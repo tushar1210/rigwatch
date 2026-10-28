@@ -1,0 +1,16 @@
+# Copy to ~/.config/rigwatch/config.yaml or pass --config.
+interval: 1s
+listen: ":7777"
+token: ""
+lhm_url: "http://127.0.0.1:8085/data.json"
+thresholds:
+  temp_amber: 75
+  temp_red: 85
+  cpu_warn: 90
+  mem_warn: 90
+  gpu_util_warn: 95
+alerts:
+  bell: false
+  # Shell command. The process gets RIGWATCH_HOST, RIGWATCH_KEY,
+  # RIGWATCH_LEVEL, RIGWATCH_VALUE, and RIGWATCH_LIMIT.
+  command: ""

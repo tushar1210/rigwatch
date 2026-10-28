@@ -1,0 +1,7 @@
+/dist/
+/bin/
+/rigwatch
+*.exe
+coverage.out
+*.cast
+.rigwatch.yaml
