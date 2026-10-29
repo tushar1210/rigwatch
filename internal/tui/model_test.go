@@ -81,6 +81,30 @@ func TestFooterSurvivesResize(t *testing.T) {
 	}
 }
 
+func TestAlertBannerClears(t *testing.T) {
+	cfg := config.Default()
+	cfg.Alerts.Baseline.Enabled = false
+	m := New(Options{Config: cfg, Sources: []Source{{Name: "local"}}})
+	m.width = 100
+	m.height = 40
+	hot := metrics.Snapshot{Temps: []metrics.Temp{{Name: "Tctl", Celsius: 90, Kind: "package"}}}
+	updated, _ := m.Update(SampleMsg{Index: 0, Snap: hot})
+	view := updated.View()
+	if !strings.Contains(view, "alert") || !strings.Contains(view, "90") {
+		t.Fatalf("banner missing:\n%s", view)
+	}
+	if !strings.Contains(view, "1 alert") {
+		t.Fatalf("status missing:\n%s", view)
+	}
+	cool := hot
+	cool.Temps[0].Celsius = 50
+	updated, _ = updated.Update(SampleMsg{Index: 0, Snap: cool})
+	view = updated.View()
+	if strings.Contains(view, "alert") {
+		t.Fatalf("banner should clear:\n%s", view)
+	}
+}
+
 func TestHotTempIsMarked(t *testing.T) {
 	m := New(Options{Config: config.Default(), Sources: []Source{{Name: "local"}}})
 	m.width = 100

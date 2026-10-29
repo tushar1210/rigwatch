@@ -13,36 +13,64 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/tushar1210/rigwatch/internal/alert"
 	"github.com/tushar1210/rigwatch/internal/collect"
 	"github.com/tushar1210/rigwatch/internal/metrics"
 )
 
 // Server publishes samples over HTTP, WebSocket, SSE, or stdio.
+// Alerts, when set, adds alert frames beside snapshots. Command runs on each
+// new alert so a headless agent can notify.
 type Server struct {
 	Token     string
 	Collector collect.Collector
 	Interval  time.Duration
+	Alerts    *alert.Engine
+	Command   string
+}
+
+type frame struct {
+	snap   metrics.Snapshot
+	alerts []alert.Event
 }
 
 type hub struct {
-	mu   sync.Mutex
-	last metrics.Snapshot
-	has  bool
-	subs map[chan metrics.Snapshot]struct{}
+	mu     sync.Mutex
+	last   metrics.Snapshot
+	has    bool
+	active []alert.Event
+	subs   map[chan frame]struct{}
 }
 
 func newHub() *hub {
-	return &hub{subs: map[chan metrics.Snapshot]struct{}{}}
+	return &hub{subs: map[chan frame]struct{}{}}
 }
 
-func (h *hub) publish(s metrics.Snapshot) {
+func (h *hub) publish(s metrics.Snapshot, evs ...alert.Event) {
+	h.send(s, nil, evs, false)
+}
+
+// publishState records the current breaches and delivers new notifications.
+// A client that connects later receives the active set once, not a backlog.
+func (h *hub) publishState(s metrics.Snapshot, active, fired []alert.Event) {
+	h.send(s, active, fired, true)
+}
+
+func (h *hub) send(s metrics.Snapshot, active, fired []alert.Event, updateActive bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.last = s
 	h.has = true
+	if updateActive {
+		h.active = append([]alert.Event(nil), active...)
+	}
+	if len(h.subs) == 0 {
+		return
+	}
+	msg := frame{snap: s, alerts: append([]alert.Event(nil), fired...)}
 	for ch := range h.subs {
 		select {
-		case ch <- s:
+		case ch <- msg:
 		default:
 		}
 	}
@@ -54,11 +82,11 @@ func (h *hub) latest() (metrics.Snapshot, bool) {
 	return h.last, h.has
 }
 
-func (h *hub) subscribe() (<-chan metrics.Snapshot, func()) {
-	ch := make(chan metrics.Snapshot, 1)
+func (h *hub) subscribe() (<-chan frame, func()) {
+	ch := make(chan frame, 1)
 	h.mu.Lock()
 	if h.has {
-		ch <- h.last
+		ch <- frame{snap: h.last, alerts: append([]alert.Event(nil), h.active...)}
 	}
 	h.subs[ch] = struct{}{}
 	h.mu.Unlock()
@@ -92,7 +120,15 @@ func (s *Server) loop(ctx context.Context, h *hub) {
 	for {
 		snap, err := s.Collector.Sample(ctx)
 		if err == nil {
-			h.publish(snap)
+			var fired, active []alert.Event
+			if s.Alerts != nil {
+				fired = s.Alerts.Evaluate(snap.Host.DisplayName(), snap)
+				active = s.Alerts.Active()
+				for _, ev := range fired {
+					alert.RunCommand(s.Command, ev)
+				}
+			}
+			h.publishState(snap, active, fired)
 		}
 		select {
 		case <-ctx.Done():
@@ -112,9 +148,14 @@ func (s *Server) serveStdio(ctx context.Context, h *hub, w io.Writer) error {
 		select {
 		case <-ctx.Done():
 			return nil
-		case snap := <-ch:
-			if err := WriteSnapshot(w, snap); err != nil {
+		case msg := <-ch:
+			if err := WriteSnapshot(w, msg.snap); err != nil {
 				return err
+			}
+			for _, ev := range msg.alerts {
+				if err := WriteAlert(w, ev); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -221,13 +262,22 @@ func (s *Server) serveSSE(w http.ResponseWriter, r *http.Request, h *hub) {
 		select {
 		case <-r.Context().Done():
 			return
-		case snap := <-ch:
-			b, err := json.Marshal(snap)
+		case msg := <-ch:
+			b, err := json.Marshal(msg.snap)
 			if err != nil {
 				return
 			}
 			if _, err := fmt.Fprintf(w, "event: snapshot\ndata: %s\n\n", b); err != nil {
 				return
+			}
+			for _, ev := range msg.alerts {
+				ab, err := json.Marshal(Envelope{Type: "alert", Alert: &ev})
+				if err != nil {
+					return
+				}
+				if _, err := fmt.Fprintf(w, "event: alert\ndata: %s\n\n", ab); err != nil {
+					return
+				}
 			}
 			flusher.Flush()
 		}
@@ -247,8 +297,8 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request, h *hub) {
 		select {
 		case <-ctx.Done():
 			return
-		case snap := <-ch:
-			b, err := json.Marshal(snap)
+		case msg := <-ch:
+			b, err := json.Marshal(msg.snap)
 			if err != nil {
 				return
 			}
@@ -257,6 +307,18 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request, h *hub) {
 			cancelWrite()
 			if err != nil {
 				return
+			}
+			for i := range msg.alerts {
+				ab, err := json.Marshal(Envelope{Type: "alert", Alert: &msg.alerts[i]})
+				if err != nil {
+					return
+				}
+				writeCtx, cancelWrite = context.WithTimeout(ctx, 5*time.Second)
+				err = conn.Write(writeCtx, websocket.MessageText, ab)
+				cancelWrite()
+				if err != nil {
+					return
+				}
 			}
 		}
 	}

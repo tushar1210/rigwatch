@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/tushar1210/rigwatch/internal/agent"
+	"github.com/tushar1210/rigwatch/internal/alert"
 	"github.com/tushar1210/rigwatch/internal/collect"
 	"github.com/tushar1210/rigwatch/internal/config"
 	"github.com/tushar1210/rigwatch/internal/tui"
@@ -88,6 +89,8 @@ WebSocket or an SSH stdio tunnel.`,
 				Token:     cfg.Token,
 				Collector: collector(cfg, opt.demo),
 				Interval:  cfg.Interval,
+				Alerts:    alert.NewEngine(cfg),
+				Command:   cfg.Alerts.Command,
 			}
 			if opt.stdio {
 				return srv.Run(cmd.Context(), "", true, os.Stdout)
@@ -146,9 +149,13 @@ func (o *options) resolve(cmd *cobra.Command) (config.Config, error) {
 	}
 	if changed(cmd, "temp-amber") {
 		cfg.Threshold.TempAmber = o.tempAmber
+		cfg.Threshold.CPUTempAmber = 0
+		cfg.Threshold.GPUTempAmber = 0
 	}
 	if changed(cmd, "temp-red") {
 		cfg.Threshold.TempRed = o.tempRed
+		cfg.Threshold.CPUTempRed = 0
+		cfg.Threshold.GPUTempRed = 0
 	}
 	if changed(cmd, "cpu-warn") {
 		cfg.Threshold.CPUWarn = o.cpuWarn

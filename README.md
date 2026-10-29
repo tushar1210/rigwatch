@@ -72,7 +72,7 @@ rigwatch agent --listen :7777 --token "$RIGWATCH_TOKEN"
 
 Flags override YAML. Lookup order is `--config`, then `$RIGWATCH_CONFIG`, then `~/.config/rigwatch/config.yaml` when that file exists.
 
-Copy [`rigwatch.example.yaml`](rigwatch.example.yaml). Thresholds color the UI and, with `alerts`, can ring the bell or run a command the first time a limit is crossed:
+Copy [`rigwatch.example.yaml`](rigwatch.example.yaml). Thresholds color the panels. Alerts use those limits, and a rolling baseline.
 
 ```yaml
 thresholds:
@@ -81,12 +81,34 @@ thresholds:
   cpu_warn: 90
   mem_warn: 90
   gpu_util_warn: 95
+  disk_warn: 90
+  fan_pct_warn: 95
+  fan_rpm_warn: 0
 alerts:
+  enabled: true
   bell: true
   command: "notify-send rigwatch \"$RIGWATCH_KEY $RIGWATCH_VALUE\""
+  cooldown: 2m
+  metrics: [cpu, memory, gpu, temp, disk, fan]
+  baseline:
+    enabled: true
+    window: 10m
+    sustain: 1m
+    margin_percent: 20
+    margin_temp: 10
+    margin_rpm: 400
+    min_samples: 12
 ```
 
-The command sees `RIGWATCH_HOST`, `RIGWATCH_KEY`, `RIGWATCH_LEVEL`, `RIGWATCH_VALUE`, and `RIGWATCH_LIMIT`. The same breach does not fire again until the reading recovers.
+CPU and GPU temperatures follow `temp_amber` / `temp_red` unless `cpu_temp_*` or `gpu_temp_*` is set. `fan_rpm_warn: 0` leaves RPM off. `metrics` limits which signals are watched.
+
+The baseline is the mean of CPU, memory, GPU, temperature, and fan samples inside `window`, excluding the current point. Disks use the fixed percent only. It alerts when a reading stays above that mean by the margin (`margin_percent`, `margin_temp`, or `margin_rpm`) for `sustain`. `min_samples` is how many points the mean needs first.
+
+The same alert does not repeat until the reading recovers and `cooldown` has passed (default 2m). Amber rising to red still notifies. The banner clears on recovery. `cooldown: 0` re-arms as soon as the reading recovers.
+
+The TUI draws a one-line banner, a status count, and highlights the panel. It rings the bell (BEL) and runs `command` when those are set. The agent writes an `alert` event on stdio, SSE (`event: alert`), and WebSocket, and runs `command` too. Snapshot frames are unchanged. WebSocket samples stay bare JSON. An alert frame is `{"type":"alert","alert":{...}}`.
+
+The command sees `RIGWATCH_HOST`, `RIGWATCH_KEY`, `RIGWATCH_LEVEL`, `RIGWATCH_KIND`, `RIGWATCH_METRIC`, `RIGWATCH_VALUE`, and `RIGWATCH_LIMIT`. The TUI and the agent each run it, so set the command on the side that should notify.
 
 ## Platforms
 

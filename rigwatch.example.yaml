@@ -6,11 +6,35 @@ lhm_url: "http://127.0.0.1:8085/data.json"
 thresholds:
   temp_amber: 75
   temp_red: 85
+  # Optional. Unset values follow temp_amber / temp_red.
+  # cpu_temp_amber: 70
+  # cpu_temp_red: 85
+  # gpu_temp_amber: 80
+  # gpu_temp_red: 90
   cpu_warn: 90
   mem_warn: 90
   gpu_util_warn: 95
+  disk_warn: 90
+  fan_pct_warn: 95
+  # 0 disables the RPM ceiling. Fan curves differ by machine.
+  fan_rpm_warn: 0
 alerts:
+  enabled: true
   bell: false
   # Shell command. The process gets RIGWATCH_HOST, RIGWATCH_KEY,
-  # RIGWATCH_LEVEL, RIGWATCH_VALUE, and RIGWATCH_LIMIT.
+  # RIGWATCH_LEVEL, RIGWATCH_KIND, RIGWATCH_METRIC, RIGWATCH_VALUE,
+  # and RIGWATCH_LIMIT.
   command: ""
+  # Hold the same alert this long after a notify. The banner still
+  # clears as soon as the reading recovers. 0 re-arms on recovery.
+  cooldown: 2m
+  # Empty means all of: cpu, memory, gpu, temp, disk, fan.
+  metrics: [cpu, memory, gpu, temp, disk, fan]
+  baseline:
+    enabled: true
+    window: 10m
+    sustain: 1m
+    margin_percent: 20
+    margin_temp: 10
+    margin_rpm: 400
+    min_samples: 12
