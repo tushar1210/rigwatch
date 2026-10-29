@@ -1,46 +1,60 @@
 # rigwatch
 
-`rigwatch` shows live machine vitals in the terminal: CPU, memory, GPU, fans, temperatures, disks, network, and the busiest processes. It runs on the machine you are sitting at, including over SSH, and it can watch other machines.
+Cross-platform terminal monitor for machine vitals: CPU and GPU temperatures, fans, memory, disks, network, and the busiest processes.
 
-Missing sensors are shown as unavailable with a short hint. They do not crash the UI.
+It watches the machine you are on, or other hosts over SSH and WebSocket. A missing sensor stays on screen with a short hint. It does not crash the UI.
+
+![Demo dashboard from rigwatch --demo: CPU, GPU, memory, fans, temperatures, disks, and network](docs/demo.png)
+
+*Demo dashboard (`rigwatch --demo`) on a synthetic Ubuntu host.*
+
+![Process list sorted by CPU](docs/processes.png)
+
+*Top processes (`p`), still from `rigwatch --demo`.*
+
+![Two-host pager, header shows 1/2](docs/connect.png)
+
+*Two hosts (`rigwatch connect`). The header shows `1/2`. `tab` switches machines.*
 
 ## Install
 
 ```bash
-go install github.com/tushar1210/rigwatch/cmd/rigwatch@latest
+go install github.com/tushar1210/rigwatch@latest
 ```
 
-Release builds cover `linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`, `windows/amd64`, and `windows/arm64`. See `.goreleaser.yaml`.
+Prebuilt binaries for macOS, Linux, and Windows (`amd64` and `arm64`) are on the [v0.1.0 release](https://github.com/tushar1210/rigwatch/releases/tag/v0.1.0). SHA256 checksums are in [`checksums.txt`](https://github.com/tushar1210/rigwatch/releases/download/v0.1.0/checksums.txt).
+
+| | amd64 | arm64 |
+| --- | --- | --- |
+| Linux | [tar.gz](https://github.com/tushar1210/rigwatch/releases/download/v0.1.0/rigwatch_0.1.0_linux_amd64.tar.gz) | [tar.gz](https://github.com/tushar1210/rigwatch/releases/download/v0.1.0/rigwatch_0.1.0_linux_arm64.tar.gz) |
+| macOS | [tar.gz](https://github.com/tushar1210/rigwatch/releases/download/v0.1.0/rigwatch_0.1.0_darwin_amd64.tar.gz) | [tar.gz](https://github.com/tushar1210/rigwatch/releases/download/v0.1.0/rigwatch_0.1.0_darwin_arm64.tar.gz) |
+| Windows | [zip](https://github.com/tushar1210/rigwatch/releases/download/v0.1.0/rigwatch_0.1.0_windows_amd64.zip) | [zip](https://github.com/tushar1210/rigwatch/releases/download/v0.1.0/rigwatch_0.1.0_windows_arm64.zip) |
 
 ## Usage
 
-Watch this machine:
+This machine:
 
 ```bash
 rigwatch
 rigwatch --interval 2s
-rigwatch --json
-rigwatch --demo
+rigwatch --json     # one JSON snapshot, then exit
+rigwatch --demo     # synthetic vitals, no sensors required
 ```
 
-Publish samples (WebSocket at `/ws`, SSE at `/api/stream`, one shot at `/api/snapshot`):
+Other machines. `tab` and `shift+tab` move between hosts.
+
+```bash
+rigwatch connect ssh://user@host
+rigwatch connect forge:7777 atlas:7777 --token "$RIGWATCH_TOKEN"
+```
+
+`ssh://` does not open a port. The client runs `rigwatch agent --stdio` on the remote host with your usual keys and `~/.ssh/config`. The remote binary must be on `PATH` for a non-interactive session, or pass `--remote-bin`.
+
+Publish samples for those clients (WebSocket `/ws`, SSE `/api/stream`, one shot `/api/snapshot`):
 
 ```bash
 rigwatch agent --listen :7777
 rigwatch agent --listen :7777 --token "$RIGWATCH_TOKEN"
-```
-
-Watch one or more agents. `tab` moves between hosts.
-
-```bash
-rigwatch connect forge:7777 atlas:7777 --token "$RIGWATCH_TOKEN"
-rigwatch connect ssh://tushar@windows-box
-```
-
-`ssh://` does not open a port. The client runs `rigwatch agent --stdio` on the remote host over OpenSSH, using your normal keys and `~/.ssh/config`. The remote binary must be on `PATH` for a non-interactive session, or pass `--remote-bin`.
-
-```bash
-rigwatch connect ssh://tushar@windows-box --remote-bin 'C:\Users\tushar\bin\rigwatch.exe'
 ```
 
 ## Keys
@@ -54,17 +68,13 @@ rigwatch connect ssh://tushar@windows-box --remote-bin 'C:\Users\tushar\bin\rigw
 | `c` / `m` | Sort processes by CPU or memory |
 | `?` | Help |
 
-No mouse. The view follows the terminal size. Colours use the terminal's profile and drop to plain text when colour is disabled (`NO_COLOR`, `TERM=dumb`).
+## Config
 
-## Configuration
+Flags override YAML. Lookup order is `--config`, then `$RIGWATCH_CONFIG`, then `~/.config/rigwatch/config.yaml` when that file exists.
 
-Flags override a YAML file. The file is `--config`, then `$RIGWATCH_CONFIG`, then `~/.config/rigwatch/config.yaml` when that file exists. See `rigwatch.example.yaml`.
+Copy [`rigwatch.example.yaml`](rigwatch.example.yaml). Thresholds color the UI and, with `alerts`, can ring the bell or run a command the first time a limit is crossed:
 
 ```yaml
-interval: 1s
-listen: ":7777"
-token: ""
-lhm_url: "http://127.0.0.1:8085/data.json"
 thresholds:
   temp_amber: 75
   temp_red: 85
@@ -76,61 +86,36 @@ alerts:
   command: "notify-send rigwatch \"$RIGWATCH_KEY $RIGWATCH_VALUE\""
 ```
 
-Amber and red thresholds colour temperatures in the UI. CPU, memory, and GPU utilisation use their own warn levels. A new breach can ring the terminal bell or run a command. The command sees `RIGWATCH_HOST`, `RIGWATCH_KEY`, `RIGWATCH_LEVEL`, `RIGWATCH_VALUE`, and `RIGWATCH_LIMIT`. Repeat samples of the same breach do not fire again until the reading recovers.
+The command sees `RIGWATCH_HOST`, `RIGWATCH_KEY`, `RIGWATCH_LEVEL`, `RIGWATCH_VALUE`, and `RIGWATCH_LIMIT`. The same breach does not fire again until the reading recovers.
 
-## Sensor support
+## Platforms
 
-| Reading | Linux | macOS | Windows |
+macOS, Windows, and Linux.
+
+| | Linux | macOS | Windows |
 | --- | --- | --- | --- |
-| CPU usage, per core | gopsutil | gopsutil | gopsutil |
-| CPU frequency | `cpufreq` `scaling_cur_freq`, else gopsutil | gopsutil | gopsutil |
-| Load average | yes | yes | gopsutil approximation from the processor queue |
-| Memory, cache, swap | yes | yes | yes; swap is labelled pagefile |
-| Temperatures | `/sys/class/hwmon`, thermal zones | SMC via IOKit, no sudo | ACPI `MSAcpi_ThermalZoneTemperature` (admin), or LibreHardwareMonitor |
-| Fans | hwmon tachometers | SMC `F*Ac` keys | LibreHardwareMonitor |
-| NVIDIA GPU | go-nvml when built with cgo; pure-Go NVML loader when `CGO_ENABLED=0`; `nvidia-smi` if both fail | `nvidia-smi` if an eGPU driver is installed | `nvml.dll` loaded at runtime, then `nvidia-smi`, then LibreHardwareMonitor |
-| AMD GPU | DRM sysfs: busy %, VRAM, hwmon temp, fan, power, clocks | — | adapter name from WMI; temps, fan, power, and clocks from LibreHardwareMonitor |
-| Intel GPU | DRM sysfs, best effort (`gpu_busy_percent`, `gt_cur_freq_mhz`, hwmon) | — | same as AMD: WMI name, LibreHardwareMonitor for the rest |
-| Apple GPU | — | `ioreg` `IOAccelerator` utilisation and wired unified memory; temperature from SMC | — |
-| Disks and network | gopsutil, per-mount and per-interface rates | gopsutil | gopsutil |
+| CPU, memory, disks, network, processes | yes | yes | yes |
+| Temperatures and fans | hwmon | SMC, no sudo | LibreHardwareMonitor, or ACPI zones as admin |
+| NVIDIA GPU | NVML or `nvidia-smi` | `nvidia-smi` when a driver is installed | `nvml.dll` or `nvidia-smi`, no extra setup |
+| AMD / Intel GPU | DRM sysfs | — | LibreHardwareMonitor |
+| Apple GPU | — | `ioreg` and SMC | — |
 
-Loopback and common virtual interfaces (`veth`, `docker`, `br-`, `cni`, and similar) are hidden. Virtual filesystems are skipped.
+### Windows
 
-NVIDIA's `go-nvml` module is Linux-only and uses cgo to `dlopen` `libnvidia-ml.so.1`. The library is not linked in, so a cgo build still starts on a machine with no driver and falls back to `nvidia-smi`. Release binaries are built with `CGO_ENABLED=0`. On Linux and Windows those binaries load NVML themselves (`libnvidia-ml.so.1` or `nvml.dll`) and use `nvidia-smi` when the library is absent. macOS does not use NVML.
+CPU, memory, disks, network, and processes need no extra software. NVIDIA cards are read from `nvml.dll` and `nvidia-smi.exe` the same way.
 
-## Windows
+Stock Windows APIs do not expose package temperature or fan RPM. For those, run [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) and turn on its WMI provider or the web server at `http://127.0.0.1:8085/data.json` (`--lhm-url` overrides that). If it is not running, the card says `start LibreHardwareMonitor`.
 
-CPU, memory, disks, network, and processes work without extra software.
-
-Thermal zones from `root\wmi` `MSAcpi_ThermalZoneTemperature` need an elevated process. A normal terminal shows `run as admin` instead of a temperature.
-
-CPU package temperatures, per-core temperatures, fan RPM, and AMD or Intel GPU telemetry are not available from stock Windows APIs. Run [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) and enable one of:
-
-- the WMI provider (`root\LibreHardwareMonitor`)
-- the remote web server, which serves `http://127.0.0.1:8085/data.json` (override with `--lhm-url`)
-
-`rigwatch` tries WMI first, then the JSON endpoint, then ACPI. If LibreHardwareMonitor is not running, the card says `start LibreHardwareMonitor`.
-
-NVIDIA cards are also read from `nvml.dll` and `nvidia-smi.exe` (including the default path under `C:\Program Files\NVIDIA Corporation\NVSMI` when it is not on `PATH`).
-
-For OpenSSH, install `rigwatch.exe` somewhere the non-interactive session can see, then:
-
-```bash
-rigwatch connect ssh://tushar@windows-box
-```
-
-## Development
+## Develop
 
 ```bash
 gofmt -w .
 gofmt -l .
-go vet ./...
-golangci-lint run
 go test ./...
 ```
 
-Cross-compiles use `CGO_ENABLED=0` for the six release targets. A normal `go build` on Linux uses cgo and go-nvml.
+Release binaries are `CGO_ENABLED=0` builds for the six targets in [`.goreleaser.yaml`](.goreleaser.yaml).
 
 ## License
 
-MIT. See `LICENSE`.
+MIT. See [LICENSE](LICENSE).
