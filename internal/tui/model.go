@@ -127,7 +127,7 @@ func New(opts Options) Model {
 		table:     tbl,
 		demo:      opts.Demo,
 		exitAfter: opts.ExitAfter,
-		alerts:    alert.New(cfg.Threshold),
+		alerts:    alert.NewEngine(cfg),
 	}
 }
 

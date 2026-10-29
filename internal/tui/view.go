@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/tushar1210/rigwatch/internal/alert"
 	"github.com/tushar1210/rigwatch/internal/metrics"
 )
 
@@ -63,17 +64,24 @@ func (m Model) renderHeader() string {
 	}
 	line := ansi.Truncate(b.String(), m.width, "…")
 	extra := ""
+	if banner := m.alertBanner(host); banner != "" {
+		extra += "\n" + banner
+	}
 	if src.err != "" {
-		extra = "\n" + styleValue(colorRed).Render("down") + styleDim().Render("  "+src.err)
+		extra += "\n" + styleValue(colorRed).Render("down") + styleDim().Render("  "+src.err)
 	} else if notes := metrics.DedupNotes(snap.Notes); len(notes) > 0 {
-		extra = "\n" + styleDim().Render(ansi.Truncate(strings.Join(notes, " · "), m.width, "…"))
+		extra += "\n" + styleDim().Render(ansi.Truncate(strings.Join(notes, " · "), m.width, "…"))
 	}
 	rule := styleFaint().Render(strings.Repeat("─", max(1, m.width)))
 	return line + extra + "\n" + rule
 }
 
 func (m Model) renderFooter() string {
-	return m.help.View(m.keys)
+	status := m.alertStatus(hostOf(m.current()))
+	if status == "" {
+		return m.help.View(m.keys)
+	}
+	return status + "\n" + m.help.View(m.keys)
 }
 
 func (m Model) renderHelp() string {
@@ -85,12 +93,12 @@ func (m Model) renderHelp() string {
 		"",
 		styleAccent().Render("thresholds"),
 		styleDim().Render(fmt.Sprintf("temp amber %.0f°C    red %.0f°C", th.TempAmber, th.TempRed)),
-		styleDim().Render(fmt.Sprintf("cpu %.0f%%    memory %.0f%%    gpu %.0f%%", th.CPUWarn, th.MemWarn, th.GPUUtilWarn)),
+		styleDim().Render(fmt.Sprintf("cpu %.0f%%    memory %.0f%%    gpu %.0f%%    disk %.0f%%", th.CPUWarn, th.MemWarn, th.GPUUtilWarn, th.DiskWarn)),
 		"",
 		styleDim().Render("A missing sensor stays on screen with a hint. It does not stop the view."),
 	}
-	if m.cfg.Alerts.Bell || m.cfg.Alerts.Command != "" {
-		lines = append(lines, styleDim().Render("alerts fire once when a threshold is crossed"))
+	if m.cfg.Alerts.Enabled {
+		lines = append(lines, styleDim().Render("alerts on a crossing or baseline, then cooldown"))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -158,6 +166,8 @@ func (m Model) cpuCard(width int, src sourceState) string {
 	if snap.CPU.UsagePercent >= m.cfg.Threshold.CPUWarn {
 		sev = worse(sev, sevAmber)
 	}
+	sev = worse(sev, m.metricSev(hostOf(src), "cpu"))
+	sev = worse(sev, m.keySev(hostOf(src), "cpu temp"))
 	title := styleAccent().Render("cpu") + "  " + m.pctColored(snap.CPU.UsagePercent, m.cfg.Threshold.CPUWarn)
 	if snap.CPU.FrequencyMHz.Available {
 		title += styleDim().Render("  " + metrics.FormatFixed(snap.CPU.FrequencyMHz.Value, " MHz"))
@@ -183,6 +193,7 @@ func (m Model) memCard(width int, src sourceState) string {
 	if mem.UsedPercent >= m.cfg.Threshold.MemWarn {
 		sev = sevAmber
 	}
+	sev = worse(sev, m.metricSev(hostOf(src), "memory"))
 	title := styleAccent().Render("memory") + "  " + styleText().Render(metrics.FormatBytes(mem.Used)+" / "+metrics.FormatBytes(mem.Total))
 	title += "  " + m.pctColored(mem.UsedPercent, m.cfg.Threshold.MemWarn)
 	inner := m.innerWidth(width)
@@ -256,6 +267,7 @@ func (m Model) gpuCard(width int, src sourceState) string {
 			sev = worse(sev, sevAmber)
 		}
 	}
+	sev = worse(sev, m.metricSev(hostOf(src), "gpu"))
 	if len(gpus) > limit {
 		lines = append(lines, styleDim().Render(fmt.Sprintf("+%d more", len(gpus)-limit)))
 	}
@@ -265,13 +277,14 @@ func (m Model) gpuCard(width int, src sourceState) string {
 func (m Model) fanCard(width int, src sourceState) string {
 	lines := []string{styleAccent().Render("fans")}
 	fans := src.snap.Fans
+	sev := m.metricSev(hostOf(src), "fan")
 	if len(fans) == 0 {
 		hint := "no fan sensors"
 		if n := firstNote(src.snap.Notes); n != "" {
 			hint = "unavailable · " + n
 		}
 		lines = append(lines, styleDim().Render(hint))
-		return m.card(width, sevOK, lines...)
+		return m.card(width, sev, lines...)
 	}
 	inner := m.innerWidth(width)
 	limit := len(fans)
@@ -279,6 +292,12 @@ func (m Model) fanCard(width int, src sourceState) string {
 		limit = 6
 	}
 	for _, f := range fans[:limit] {
+		if m.cfg.Threshold.FanPctWarn > 0 && f.HasPercent && f.Percent >= m.cfg.Threshold.FanPctWarn {
+			sev = worse(sev, sevAmber)
+		}
+		if m.cfg.Threshold.FanRPMWarn > 0 && f.HasRPM && f.RPM >= m.cfg.Threshold.FanRPMWarn {
+			sev = worse(sev, sevAmber)
+		}
 		val := fanValue(f)
 		nameW := inner - len([]rune(val)) - 1
 		if nameW < 6 {
@@ -287,7 +306,7 @@ func (m Model) fanCard(width int, src sourceState) string {
 		name := trunc(f.Name, nameW)
 		lines = append(lines, styleText().Render(pad(name, nameW))+" "+styleDim().Render(val))
 	}
-	return m.card(width, sevOK, lines...)
+	return m.card(width, sev, lines...)
 }
 
 func (m Model) tempCard(width int, src sourceState) string {
@@ -301,7 +320,7 @@ func (m Model) tempCard(width int, src sourceState) string {
 		lines = append(lines, styleDim().Render(hint))
 		return m.card(width, sevOK, lines...)
 	}
-	sev := sevOK
+	sev := m.metricSev(hostOf(src), "temp")
 	inner := m.innerWidth(width)
 	limit := len(temps)
 	if limit > 8 {
@@ -318,9 +337,14 @@ func (m Model) tempCard(width int, src sourceState) string {
 func (m Model) diskCard(width int, src sourceState) string {
 	lines := []string{styleAccent().Render("disks")}
 	disks := src.snap.Disks
+	sev := m.metricSev(hostOf(src), "disk")
+	warn := m.cfg.Threshold.DiskWarn
+	if warn <= 0 {
+		warn = 101
+	}
 	if len(disks) == 0 {
 		lines = append(lines, styleDim().Render("no disks"))
-		return m.card(width, sevOK, lines...)
+		return m.card(width, sev, lines...)
 	}
 	inner := m.innerWidth(width)
 	limit := len(disks)
@@ -328,14 +352,17 @@ func (m Model) diskCard(width int, src sourceState) string {
 		limit = 4
 	}
 	for _, d := range disks[:limit] {
+		if m.cfg.Threshold.DiskWarn > 0 && d.UsedPercent >= m.cfg.Threshold.DiskWarn {
+			sev = worse(sev, sevAmber)
+		}
 		name := trunc(d.Mount, max(6, inner/3))
-		line := styleText().Render(pad(name, max(6, inner/3))) + " " + m.pctColored(d.UsedPercent, 90)
+		line := styleText().Render(pad(name, max(6, inner/3))) + " " + m.pctColored(d.UsedPercent, warn)
 		if d.ThroughputOK {
 			line += styleDim().Render(fmt.Sprintf("  r %s  w %s", metrics.FormatRate(d.ReadBytesPerSec), metrics.FormatRate(d.WriteBytesPerSec)))
 		}
 		lines = append(lines, ansi.Truncate(line, inner+8, "…"))
 	}
-	return m.card(width, sevOK, lines...)
+	return m.card(width, sev, lines...)
 }
 
 func (m Model) netCard(width int, src sourceState) string {
@@ -515,6 +542,106 @@ func fanText(g metrics.GPU) string {
 	default:
 		return styleDim().Render("fan unavailable")
 	}
+}
+
+func hostOf(src sourceState) string {
+	if src.snap.Host.Hostname != "" {
+		return src.snap.Host.Hostname
+	}
+	if src.name != "" {
+		return src.name
+	}
+	return ""
+}
+
+func (m Model) activeEvents(host string) []alert.Event {
+	if !m.cfg.Alerts.Enabled || m.alerts == nil {
+		return nil
+	}
+	var out []alert.Event
+	for _, ev := range m.alerts.Active() {
+		if ev.Host == host {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
+func (m Model) alertBanner(host string) string {
+	evs := m.activeEvents(host)
+	if len(evs) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(evs))
+	red := false
+	for _, ev := range evs {
+		if ev.Level == "red" {
+			red = true
+		}
+		text := ev.Summary()
+		if ev.Kind == "baseline" {
+			text = "base " + text
+		}
+		parts = append(parts, text)
+	}
+	label := "alert"
+	if len(evs) > 1 {
+		label = "alerts"
+	}
+	color := colorAmber
+	if red {
+		color = colorRed
+	}
+	line := label + "  " + strings.Join(parts, " · ")
+	return styleValue(color).Render(ansi.Truncate(line, max(8, m.width), "…"))
+}
+
+func (m Model) alertStatus(host string) string {
+	evs := m.activeEvents(host)
+	n := len(evs)
+	if n == 0 {
+		return ""
+	}
+	word := "alert"
+	if n != 1 {
+		word = "alerts"
+	}
+	color := colorAmber
+	for _, ev := range evs {
+		if ev.Level == "red" {
+			color = colorRed
+			break
+		}
+	}
+	return styleValue(color).Render(fmt.Sprintf("%d %s", n, word))
+}
+
+func (m Model) metricSev(host, metric string) severity {
+	sev := sevOK
+	for _, ev := range m.activeEvents(host) {
+		if ev.Kind != "baseline" || ev.Metric != metric {
+			continue
+		}
+		if ev.Level == "red" {
+			return sevRed
+		}
+		sev = sevAmber
+	}
+	return sev
+}
+
+func (m Model) keySev(host, key string) severity {
+	sev := sevOK
+	for _, ev := range m.activeEvents(host) {
+		if ev.Kind != "baseline" || ev.Key != key {
+			continue
+		}
+		if ev.Level == "red" {
+			return sevRed
+		}
+		sev = sevAmber
+	}
+	return sev
 }
 
 func worse(a, b severity) severity {

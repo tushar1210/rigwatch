@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"io"
@@ -12,7 +13,9 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/tushar1210/rigwatch/internal/alert"
 	"github.com/tushar1210/rigwatch/internal/collect"
+	"github.com/tushar1210/rigwatch/internal/config"
 	"github.com/tushar1210/rigwatch/internal/metrics"
 )
 
@@ -133,5 +136,62 @@ func TestStdio(t *testing.T) {
 	}
 	if got.Host.Hostname != "forge" {
 		t.Fatalf("snap = %+v", got.Host)
+	}
+}
+
+func TestStdioAlertEvent(t *testing.T) {
+	cfg := config.Default()
+	cfg.Alerts.Baseline.Enabled = false
+	hot := metrics.Snapshot{
+		Host:  metrics.Host{Hostname: "forge"},
+		Temps: []metrics.Temp{{Name: "Tctl", Celsius: 90, Kind: "package"}},
+	}
+	s := &Server{
+		Interval:  20 * time.Millisecond,
+		Collector: &collect.Fake{Snap: hot},
+		Alerts:    alert.NewEngine(cfg),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pr, pw := io.Pipe()
+	errc := make(chan error, 1)
+	go func() {
+		errc <- s.Run(ctx, "", true, pw)
+	}()
+	type seen struct {
+		snap  bool
+		alert bool
+	}
+	got := make(chan seen, 1)
+	go func() {
+		sc := bufio.NewScanner(pr)
+		var have seen
+		for sc.Scan() {
+			line := sc.Text()
+			if strings.Contains(line, `"type":"snapshot"`) && strings.Contains(line, "forge") {
+				have.snap = true
+			}
+			if strings.Contains(line, `"type":"alert"`) && strings.Contains(line, "cpu temp") {
+				have.alert = true
+			}
+			if have.snap && have.alert {
+				got <- have
+				cancel()
+				return
+			}
+		}
+		got <- have
+	}()
+	select {
+	case <-time.After(2 * time.Second):
+		cancel()
+		_ = pr.Close()
+		t.Fatal("timeout")
+	case have := <-got:
+		cancel()
+		_ = pr.Close()
+		if !have.snap || !have.alert {
+			t.Fatalf("stdio frames = %+v", have)
+		}
 	}
 }

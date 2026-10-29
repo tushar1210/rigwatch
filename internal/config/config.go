@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -22,18 +23,79 @@ type Config struct {
 }
 
 // Thresholds control colour and alert edges.
+// CPU and GPU temperature fields fall back to TempAmber and TempRed when zero.
+// FanRPMWarn of zero does not apply an RPM ceiling.
 type Thresholds struct {
-	TempAmber   float64 `yaml:"temp_amber"`
-	TempRed     float64 `yaml:"temp_red"`
-	CPUWarn     float64 `yaml:"cpu_warn"`
-	MemWarn     float64 `yaml:"mem_warn"`
-	GPUUtilWarn float64 `yaml:"gpu_util_warn"`
+	TempAmber    float64 `yaml:"temp_amber"`
+	TempRed      float64 `yaml:"temp_red"`
+	CPUTempAmber float64 `yaml:"cpu_temp_amber"`
+	CPUTempRed   float64 `yaml:"cpu_temp_red"`
+	GPUTempAmber float64 `yaml:"gpu_temp_amber"`
+	GPUTempRed   float64 `yaml:"gpu_temp_red"`
+	CPUWarn      float64 `yaml:"cpu_warn"`
+	MemWarn      float64 `yaml:"mem_warn"`
+	GPUUtilWarn  float64 `yaml:"gpu_util_warn"`
+	DiskWarn     float64 `yaml:"disk_warn"`
+	FanPctWarn   float64 `yaml:"fan_pct_warn"`
+	FanRPMWarn   float64 `yaml:"fan_rpm_warn"`
 }
 
-// Alerts optionally rings the terminal bell or runs a command on a new breach.
+// CPUTemp returns the CPU temperature pair, inheriting the shared limits.
+func (t Thresholds) CPUTemp() (amber, red float64) {
+	return t.pair(t.CPUTempAmber, t.CPUTempRed)
+}
+
+// GPUTemp returns the GPU temperature pair, inheriting the shared limits.
+func (t Thresholds) GPUTemp() (amber, red float64) {
+	return t.pair(t.GPUTempAmber, t.GPUTempRed)
+}
+
+func (t Thresholds) pair(amber, red float64) (float64, float64) {
+	if amber <= 0 {
+		amber = t.TempAmber
+	}
+	if red <= 0 {
+		red = t.TempRed
+	}
+	return amber, red
+}
+
+// Alerts configures threshold and baseline notifications.
 type Alerts struct {
-	Bell    bool   `yaml:"bell"`
-	Command string `yaml:"command"`
+	Enabled  bool
+	Bell     bool
+	Command  string
+	Cooldown time.Duration
+	Metrics  []string
+	Baseline Baseline
+}
+
+// Allows reports whether metric should be evaluated.
+// An empty Metrics list means every known metric.
+func (a Alerts) Allows(metric string) bool {
+	if !a.Enabled {
+		return false
+	}
+	if len(a.Metrics) == 0 {
+		return true
+	}
+	for _, m := range a.Metrics {
+		if strings.EqualFold(strings.TrimSpace(m), metric) {
+			return true
+		}
+	}
+	return false
+}
+
+// Baseline is a rolling mean compared with a margin.
+type Baseline struct {
+	Enabled       bool
+	Window        time.Duration
+	Sustain       time.Duration
+	MarginPercent float64
+	MarginTemp    float64
+	MarginRPM     float64
+	MinSamples    int
 }
 
 // Default returns the built-in configuration.
@@ -48,17 +110,51 @@ func Default() Config {
 			CPUWarn:     90,
 			MemWarn:     90,
 			GPUUtilWarn: 95,
+			DiskWarn:    90,
+			FanPctWarn:  95,
+		},
+		Alerts: Alerts{
+			Enabled:  true,
+			Cooldown: 2 * time.Minute,
+			Baseline: Baseline{
+				Enabled:       true,
+				Window:        10 * time.Minute,
+				Sustain:       time.Minute,
+				MarginPercent: 20,
+				MarginTemp:    10,
+				MarginRPM:     400,
+				MinSamples:    12,
+			},
 		},
 	}
 }
 
 type fileConfig struct {
-	Interval  string     `yaml:"interval"`
-	Listen    string     `yaml:"listen"`
-	Token     string     `yaml:"token"`
-	LHMURL    string     `yaml:"lhm_url"`
-	Threshold Thresholds `yaml:"thresholds"`
-	Alerts    Alerts     `yaml:"alerts"`
+	Interval  string      `yaml:"interval"`
+	Listen    string      `yaml:"listen"`
+	Token     string      `yaml:"token"`
+	LHMURL    string      `yaml:"lhm_url"`
+	Threshold Thresholds  `yaml:"thresholds"`
+	Alerts    *alertsFile `yaml:"alerts"`
+}
+
+type alertsFile struct {
+	Enabled  *bool         `yaml:"enabled"`
+	Bell     *bool         `yaml:"bell"`
+	Command  *string       `yaml:"command"`
+	Cooldown string        `yaml:"cooldown"`
+	Metrics  []string      `yaml:"metrics"`
+	Baseline *baselineFile `yaml:"baseline"`
+}
+
+type baselineFile struct {
+	Enabled       *bool   `yaml:"enabled"`
+	Window        string  `yaml:"window"`
+	Sustain       string  `yaml:"sustain"`
+	MarginPercent float64 `yaml:"margin_percent"`
+	MarginTemp    float64 `yaml:"margin_temp"`
+	MarginRPM     float64 `yaml:"margin_rpm"`
+	MinSamples    int     `yaml:"min_samples"`
 }
 
 // Load reads path when it is non-empty. Otherwise it reads
@@ -113,11 +209,81 @@ func Load(path string) (Config, error) {
 		cfg.LHMURL = raw.LHMURL
 	}
 	cfg.Threshold = mergeThreshold(cfg.Threshold, raw.Threshold)
-	cfg.Alerts = raw.Alerts
+	alerts, err := applyAlerts(cfg.Alerts, raw.Alerts)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.Alerts = alerts
 	if err := cfg.Validate(); err != nil {
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+func applyAlerts(base Alerts, raw *alertsFile) (Alerts, error) {
+	if raw == nil {
+		return base, nil
+	}
+	if raw.Enabled != nil {
+		base.Enabled = *raw.Enabled
+	}
+	if raw.Bell != nil {
+		base.Bell = *raw.Bell
+	}
+	if raw.Command != nil {
+		base.Command = *raw.Command
+	}
+	if raw.Cooldown != "" {
+		d, err := time.ParseDuration(raw.Cooldown)
+		if err != nil {
+			return base, fmt.Errorf("alerts.cooldown: %w", err)
+		}
+		base.Cooldown = d
+	}
+	if raw.Metrics != nil {
+		base.Metrics = append([]string(nil), raw.Metrics...)
+	}
+	if raw.Baseline != nil {
+		b, err := applyBaseline(base.Baseline, raw.Baseline)
+		if err != nil {
+			return base, err
+		}
+		base.Baseline = b
+	}
+	return base, nil
+}
+
+func applyBaseline(base Baseline, raw *baselineFile) (Baseline, error) {
+	if raw.Enabled != nil {
+		base.Enabled = *raw.Enabled
+	}
+	if raw.Window != "" {
+		d, err := time.ParseDuration(raw.Window)
+		if err != nil {
+			return base, fmt.Errorf("alerts.baseline.window: %w", err)
+		}
+		base.Window = d
+	}
+	if raw.Sustain != "" {
+		d, err := time.ParseDuration(raw.Sustain)
+		if err != nil {
+			return base, fmt.Errorf("alerts.baseline.sustain: %w", err)
+		}
+		base.Sustain = d
+	}
+	if raw.MarginPercent != 0 {
+		base.MarginPercent = raw.MarginPercent
+	}
+	if raw.MarginTemp != 0 {
+		base.MarginTemp = raw.MarginTemp
+	}
+	if raw.MarginRPM != 0 {
+		base.MarginRPM = raw.MarginRPM
+	}
+	if raw.MinSamples != 0 {
+		base.MinSamples = raw.MinSamples
+	}
+	return base, nil
 }
 
 func mergeThreshold(base, over Thresholds) Thresholds {
@@ -126,6 +292,18 @@ func mergeThreshold(base, over Thresholds) Thresholds {
 	}
 	if over.TempRed != 0 {
 		base.TempRed = over.TempRed
+	}
+	if over.CPUTempAmber != 0 {
+		base.CPUTempAmber = over.CPUTempAmber
+	}
+	if over.CPUTempRed != 0 {
+		base.CPUTempRed = over.CPUTempRed
+	}
+	if over.GPUTempAmber != 0 {
+		base.GPUTempAmber = over.GPUTempAmber
+	}
+	if over.GPUTempRed != 0 {
+		base.GPUTempRed = over.GPUTempRed
 	}
 	if over.CPUWarn != 0 {
 		base.CPUWarn = over.CPUWarn
@@ -136,6 +314,15 @@ func mergeThreshold(base, over Thresholds) Thresholds {
 	if over.GPUUtilWarn != 0 {
 		base.GPUUtilWarn = over.GPUUtilWarn
 	}
+	if over.DiskWarn != 0 {
+		base.DiskWarn = over.DiskWarn
+	}
+	if over.FanPctWarn != 0 {
+		base.FanPctWarn = over.FanPctWarn
+	}
+	if over.FanRPMWarn != 0 {
+		base.FanRPMWarn = over.FanRPMWarn
+	}
 	return base
 }
 
@@ -144,11 +331,58 @@ func (c Config) Validate() error {
 	if c.Interval < 200*time.Millisecond {
 		return fmt.Errorf("interval %s is below 200ms", c.Interval)
 	}
-	if c.Threshold.TempAmber <= 0 || c.Threshold.TempRed <= 0 {
-		return fmt.Errorf("temperature thresholds must be positive")
+	if err := checkPair("temp", c.Threshold.TempAmber, c.Threshold.TempRed); err != nil {
+		return err
 	}
-	if c.Threshold.TempAmber >= c.Threshold.TempRed {
-		return fmt.Errorf("temp amber %.0f must be below temp red %.0f", c.Threshold.TempAmber, c.Threshold.TempRed)
+	amber, red := c.Threshold.CPUTemp()
+	if err := checkPair("cpu temp", amber, red); err != nil {
+		return err
+	}
+	amber, red = c.Threshold.GPUTemp()
+	if err := checkPair("gpu temp", amber, red); err != nil {
+		return err
+	}
+	if c.Alerts.Cooldown < 0 {
+		return fmt.Errorf("alert cooldown must be >= 0")
+	}
+	for _, m := range c.Alerts.Metrics {
+		if !knownMetric(m) {
+			return fmt.Errorf("unknown alert metric %q", m)
+		}
+	}
+	b := c.Alerts.Baseline
+	if c.Alerts.Enabled && b.Enabled {
+		if b.Window <= 0 {
+			return fmt.Errorf("baseline window must be positive")
+		}
+		if b.Sustain < 0 {
+			return fmt.Errorf("baseline sustain must be >= 0")
+		}
+		if b.MinSamples < 1 {
+			return fmt.Errorf("baseline min_samples must be >= 1")
+		}
+		if b.MarginPercent < 0 || b.MarginTemp < 0 || b.MarginRPM < 0 {
+			return fmt.Errorf("baseline margins must be >= 0")
+		}
 	}
 	return nil
+}
+
+func checkPair(name string, amber, red float64) error {
+	if amber <= 0 || red <= 0 {
+		return fmt.Errorf("%s thresholds must be positive", name)
+	}
+	if amber >= red {
+		return fmt.Errorf("%s amber %.0f must be below red %.0f", name, amber, red)
+	}
+	return nil
+}
+
+func knownMetric(metric string) bool {
+	switch strings.ToLower(strings.TrimSpace(metric)) {
+	case "cpu", "memory", "gpu", "temp", "disk", "fan":
+		return true
+	default:
+		return false
+	}
 }

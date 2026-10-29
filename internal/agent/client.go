@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -51,11 +52,17 @@ func OpenWebSocket(ctx context.Context, url, token string) (Stream, error) {
 }
 
 func (s *wsStream) Recv(ctx context.Context) (metrics.Snapshot, error) {
-	_, data, err := s.conn.Read(ctx)
-	if err != nil {
-		return metrics.Snapshot{}, err
+	for {
+		_, data, err := s.conn.Read(ctx)
+		if err != nil {
+			return metrics.Snapshot{}, err
+		}
+		snap, err := decodeLine(data)
+		if errors.Is(err, errSkipFrame) {
+			continue
+		}
+		return snap, err
 	}
-	return decodeLine(data)
 }
 
 func (s *wsStream) Close() error {
