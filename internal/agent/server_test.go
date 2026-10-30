@@ -290,7 +290,7 @@ func TestWebSocketShutdown(t *testing.T) {
 func TestReaderStreamShutdownRefusal(t *testing.T) {
 	pr, pw := io.Pipe()
 	st := newReaderStream(pr, nil)
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	go func() {
 		_, _ = io.WriteString(pw, "{\"type\":\"shutdown\",\"ok\":false,\"error\":\"must be root\"}\n")
 	}()
