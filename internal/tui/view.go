@@ -3,8 +3,10 @@ package tui
 import (
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
@@ -97,10 +99,15 @@ func (m Model) renderHeader() string {
 
 func (m Model) renderFooter() string {
 	status := m.alertStatus(hostOf(m.current()))
-	if status == "" {
-		return m.help.View(m.keys)
+	var keys help.KeyMap = m.keys
+	if m.showProc && !m.showHelp {
+		keys = procKeyMap{m.keys}
 	}
-	return status + "\n" + m.help.View(m.keys)
+	view := m.help.View(keys)
+	if status == "" {
+		return view
+	}
+	return status + "\n" + view
 }
 
 func (m Model) renderHelp() string {
@@ -108,7 +115,7 @@ func (m Model) renderHelp() string {
 	lines := []string{
 		styleAccent().Render("keys"),
 		styleDim().Render("q quit    esc back    tab host    p processes    a alerts"),
-		styleDim().Render("c cpu    m mem    g gpu    ? close help"),
+		styleDim().Render("c cpu   m mem   g gpu   G vram   x kill   ? close"),
 		"",
 		styleAccent().Render("thresholds"),
 		styleDim().Render(fmt.Sprintf("temp amber %.0f°C    red %.0f°C", th.TempAmber, th.TempRed)),
@@ -135,16 +142,188 @@ func (m Model) renderProcs() string {
 	if len(src.snap.Processes) == 0 {
 		return styleDim().Render("no processes")
 	}
-	title := styleAccent().Render("processes")
-	switch m.sortBy {
-	case sortByMem:
-		title += styleDim().Render("  by memory")
-	case sortByGPU:
-		title += styleDim().Render("  by gpu")
-	default:
-		title += styleDim().Render("  by cpu")
+	title := styleAccent().Render("processes") + styleDim().Render("  by "+sortLabel(m.sortBy))
+	var lines []string
+	lines = append(lines, title)
+	switch {
+	case m.killAsk != nil:
+		lines = append(lines, styleValue(colorAmber).Render(m.killAsk.prompt()))
+	case m.procNote != "":
+		lines = append(lines, styleValue(noteColor(m.procNote)).Render(m.procNote))
 	}
-	return title + "\n" + m.table.View()
+	lines = append(lines, m.renderProcTable())
+	return strings.Join(lines, "\n")
+}
+
+func sortLabel(by metrics.ProcessSort) string {
+	switch by {
+	case metrics.SortByRSS:
+		return "memory"
+	case metrics.SortByGPU:
+		return "gpu"
+	case metrics.SortByVRAM:
+		return "vram"
+	default:
+		return "cpu"
+	}
+}
+
+func noteColor(note string) string {
+	switch {
+	case strings.Contains(note, "denied") || strings.Contains(note, "failed") || note == "refused":
+		return colorRed
+	default:
+		return colorDim
+	}
+}
+
+func (m Model) renderProcTable() string {
+	rows := m.procRows
+	showGPU := procHasGPU(rows)
+	nameW := procNameWidth(m.width, showGPU)
+	var b strings.Builder
+	b.WriteString(procHeader(showGPU, nameW))
+	start, end := m.procWindow()
+	for i := start; i < end; i++ {
+		b.WriteByte('\n')
+		b.WriteString(m.procLine(i, rows[i], showGPU, nameW))
+	}
+	return b.String()
+}
+
+func (m Model) procWindow() (start, end int) {
+	n := len(m.procRows)
+	limit := m.height - 8
+	if limit < 4 {
+		limit = 4
+	}
+	if n <= limit {
+		return 0, n
+	}
+	cur := m.table.Cursor()
+	if cur < 0 {
+		cur = 0
+	}
+	start = cur - limit/2
+	if start < 0 {
+		start = 0
+	}
+	end = start + limit
+	if end > n {
+		end = n
+		start = end - limit
+		if start < 0 {
+			start = 0
+		}
+	}
+	return start, end
+}
+
+func procHasGPU(rows []metrics.Process) bool {
+	for _, p := range rows {
+		if p.GPUUtilOK || p.GPUMemOK || p.GPUMemPctOK {
+			return true
+		}
+	}
+	return false
+}
+
+func procNameWidth(screen int, showGPU bool) int {
+	used := 1 + 1 + 7 + 6 + 6 + 8
+	fields := 7
+	if showGPU {
+		used += 6 + 8
+		fields += 2
+	}
+	nameW := screen - used - (fields - 1)
+	if nameW < 8 {
+		nameW = 8
+	}
+	return nameW
+}
+
+func procHeader(showGPU bool, nameW int) string {
+	parts := []string{
+		col(" ", 1),
+		col("#", 1),
+		col("PID", 7),
+		col("CPU", 6),
+		col("MEM", 6),
+		col("RSS", 8),
+	}
+	if showGPU {
+		parts = append(parts, col("GPU", 6), col("VRAM", 8))
+	}
+	parts = append(parts, col("NAME", nameW))
+	return styleDim().Render(strings.Join(parts, " "))
+}
+
+func (m Model) procLine(i int, p metrics.Process, showGPU bool, nameW int) string {
+	selected := i == m.table.Cursor()
+	st := rankStyle(i, selected)
+	mark := " "
+	if selected {
+		mark = ">"
+	}
+	rank := " "
+	if i < 3 {
+		rank = strconv.Itoa(i + 1)
+	}
+	parts := []string{
+		st.Render(col(mark, 1)),
+		st.Render(col(rank, 1)),
+		col(strconv.FormatInt(int64(p.PID), 10), 7),
+		col(metrics.FormatPercent(p.CPUPercent), 6),
+		col(metrics.FormatPercent(p.MemPercent), 6),
+		col(metrics.FormatBytes(p.RSS), 8),
+	}
+	if showGPU {
+		parts = append(parts, col(formatGPUUtil(p), 6), col(formatGPUMem(p), 8))
+	}
+	name := p.Name
+	if name == "" {
+		name = "?"
+	}
+	parts = append(parts, st.Render(col(trunc(name, nameW), nameW)))
+	return ansi.Truncate(strings.Join(parts, " "), max(8, m.width), "…")
+}
+
+func rankStyle(i int, selected bool) lipgloss.Style {
+	if selected || i == 0 {
+		return styleAccent()
+	}
+	if i == 1 {
+		return styleText().Bold(true)
+	}
+	if i == 2 {
+		return styleValue(colorAmber)
+	}
+	return styleText()
+}
+
+func formatGPUUtil(p metrics.Process) string {
+	if !p.GPUUtilOK {
+		return "-"
+	}
+	return metrics.FormatPercent(p.GPUPercent)
+}
+
+func formatGPUMem(p metrics.Process) string {
+	if p.GPUMemOK {
+		return metrics.FormatBytes(p.GPUMem)
+	}
+	if p.GPUMemPctOK {
+		return metrics.FormatPercent(p.GPUMemPercent)
+	}
+	return "-"
+}
+
+func col(s string, n int) string {
+	w := ansi.StringWidth(s)
+	if w > n {
+		return ansi.Truncate(s, n, "")
+	}
+	return s + strings.Repeat(" ", n-w)
 }
 
 func (m Model) renderAlerts() string {

@@ -7,7 +7,6 @@ import (
 	"runtime"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/shirou/gopsutil/v4/cpu"
@@ -33,12 +32,6 @@ type Live struct {
 	prevDisk map[string]diskCount
 	prevNet  map[string]netCount
 	prevAt   time.Time
-
-	gpuMu      sync.Mutex
-	gpuStats   []gpuProcStat
-	gpuNext    time.Time
-	gpuBusy    bool
-	gpuMissing bool
 }
 
 type diskCount struct {
@@ -270,7 +263,7 @@ func (l *Live) fillProcs(ctx context.Context, snap *metrics.Snapshot) {
 			RSS:        rss,
 		})
 	}
-	rows = applyGPUProcs(rows, l.gpuProcessStats())
+	rows = attachGPUProcs(ctx, rows)
 	snap.Processes = topProcesses(rows, 12)
 }
 
@@ -278,16 +271,12 @@ func topProcesses(rows []metrics.Process, n int) []metrics.Process {
 	if len(rows) == 0 {
 		return nil
 	}
-	byCPU := append([]metrics.Process(nil), rows...)
-	sort.Slice(byCPU, func(i, j int) bool { return byCPU[i].CPUPercent > byCPU[j].CPUPercent })
-	byMem := append([]metrics.Process(nil), rows...)
-	sort.Slice(byMem, func(i, j int) bool { return byMem[i].MemPercent > byMem[j].MemPercent })
 	seen := map[int32]struct{}{}
 	var out []metrics.Process
 	take := func(list []metrics.Process, limit int) {
 		added := 0
 		for _, p := range list {
-			if added >= limit || len(out) >= n+4 {
+			if added >= limit {
 				return
 			}
 			if _, ok := seen[p.PID]; ok {
@@ -298,19 +287,33 @@ func topProcesses(rows []metrics.Process, n int) []metrics.Process {
 			added++
 		}
 	}
-	take(byCPU, n)
-	take(byMem, 8)
-	for _, p := range rows {
-		if !p.HasGPU && !p.HasGPUMem {
-			continue
-		}
-		if _, ok := seen[p.PID]; ok {
-			continue
-		}
-		seen[p.PID] = struct{}{}
-		out = append(out, p)
+	take(metrics.SortProcesses(rows, metrics.SortByCPU), n)
+	take(metrics.SortProcesses(rows, metrics.SortByRSS), 8)
+	if rowsHaveGPUUtil(rows) {
+		take(metrics.SortProcesses(rows, metrics.SortByGPU), 8)
+	}
+	if rowsHaveVRAM(rows) {
+		take(metrics.SortProcesses(rows, metrics.SortByVRAM), 8)
 	}
 	return out
+}
+
+func rowsHaveGPUUtil(rows []metrics.Process) bool {
+	for _, p := range rows {
+		if p.GPUUtilOK {
+			return true
+		}
+	}
+	return false
+}
+
+func rowsHaveVRAM(rows []metrics.Process) bool {
+	for _, p := range rows {
+		if p.GPUMemOK || p.GPUMemPctOK {
+			return true
+		}
+	}
+	return false
 }
 
 func perSec(prev, cur uint64, elapsed time.Duration) float64 {

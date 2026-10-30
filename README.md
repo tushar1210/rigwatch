@@ -1,20 +1,30 @@
 # rigwatch
 
-Cross-platform terminal monitor for machine vitals: CPU and GPU temperatures, fans, memory, disks, network, and the busiest processes.
+Terminal monitor for CPU, GPU, memory, disks, network, temperatures, fans, and the busiest processes. It watches this machine, or other hosts over SSH and WebSocket. A missing sensor stays on screen with a short hint.
 
-It watches the machine you are on, or other hosts over SSH and WebSocket. A missing sensor stays on screen with a short hint. It does not crash the UI.
+![Demo dashboard with labeled sparklines on CPU, memory, GPU, and temperature](docs/demo.png)
 
-![Demo dashboard from rigwatch --demo: CPU, GPU, memory, fans, temperatures, disks, and network](docs/demo.png)
+*Dashboard from `rigwatch --demo`. CPU, memory, GPU, and temperature each draw a labeled sparkline.*
 
-*Demo dashboard (`rigwatch --demo`) on a synthetic Ubuntu host.*
+![Process list sorted by GPU, with ranks 1–3 and GPU and VRAM columns](docs/processes.png)
 
-![Process list sorted by CPU](docs/processes.png)
+*Processes (`p`), sorted by GPU (`g`). Ranks 1–3 follow the current sort. GPU and VRAM show when `nvidia-smi` reports them.*
 
-*Top processes (`p`), still from `rigwatch --demo`.*
+![Alert history drawer listing time, host, metric, and level](docs/history.png)
 
-![Two-host pager, header shows 1/2](docs/connect.png)
+*Alert history (`a`). Time, host, metric, and level for this session. `esc` closes it.*
 
-*Two hosts (`rigwatch connect`). The header shows `1/2`. `tab` switches machines.*
+![Stale host with reconnect in the header and amber card borders](docs/stale.png)
+
+*A dropped SSH link. The header says `stale` and `reconnect` until the next sample.*
+
+![Two-host view, header shows 2/2 on atlas](docs/connect.png)
+
+*Two hosts (`rigwatch connect`). The header shows `2/2`. `tab` switches machines.*
+
+![Alert banner above the dashboard, CPU, GPU, and temperature cards outlined](docs/alert.png)
+
+*Alert banner from `rigwatch --demo --temp-amber 61`. Crossed cards take the amber border, and the footer counts the open alerts.*
 
 ## Install
 
@@ -22,13 +32,13 @@ It watches the machine you are on, or other hosts over SSH and WebSocket. A miss
 go install github.com/tushar1210/rigwatch@latest
 ```
 
-Prebuilt binaries for macOS, Linux, and Windows (`amd64` and `arm64`) are on the [v0.1.0 release](https://github.com/tushar1210/rigwatch/releases/tag/v0.1.0). SHA256 checksums are in [`checksums.txt`](https://github.com/tushar1210/rigwatch/releases/download/v0.1.0/checksums.txt).
+Prebuilt binaries for macOS, Linux, and Windows (`amd64` and `arm64`) are on the [v0.4.0 release](https://github.com/tushar1210/rigwatch/releases/tag/v0.4.0). SHA256 checksums are in [`checksums.txt`](https://github.com/tushar1210/rigwatch/releases/download/v0.4.0/checksums.txt).
 
 | | amd64 | arm64 |
 | --- | --- | --- |
-| Linux | [tar.gz](https://github.com/tushar1210/rigwatch/releases/download/v0.1.0/rigwatch_0.1.0_linux_amd64.tar.gz) | [tar.gz](https://github.com/tushar1210/rigwatch/releases/download/v0.1.0/rigwatch_0.1.0_linux_arm64.tar.gz) |
-| macOS | [tar.gz](https://github.com/tushar1210/rigwatch/releases/download/v0.1.0/rigwatch_0.1.0_darwin_amd64.tar.gz) | [tar.gz](https://github.com/tushar1210/rigwatch/releases/download/v0.1.0/rigwatch_0.1.0_darwin_arm64.tar.gz) |
-| Windows | [zip](https://github.com/tushar1210/rigwatch/releases/download/v0.1.0/rigwatch_0.1.0_windows_amd64.zip) | [zip](https://github.com/tushar1210/rigwatch/releases/download/v0.1.0/rigwatch_0.1.0_windows_arm64.zip) |
+| Linux | [tar.gz](https://github.com/tushar1210/rigwatch/releases/download/v0.4.0/rigwatch_0.4.0_linux_amd64.tar.gz) | [tar.gz](https://github.com/tushar1210/rigwatch/releases/download/v0.4.0/rigwatch_0.4.0_linux_arm64.tar.gz) |
+| macOS | [tar.gz](https://github.com/tushar1210/rigwatch/releases/download/v0.4.0/rigwatch_0.4.0_darwin_amd64.tar.gz) | [tar.gz](https://github.com/tushar1210/rigwatch/releases/download/v0.4.0/rigwatch_0.4.0_darwin_arm64.tar.gz) |
+| Windows | [zip](https://github.com/tushar1210/rigwatch/releases/download/v0.4.0/rigwatch_0.4.0_windows_amd64.zip) | [zip](https://github.com/tushar1210/rigwatch/releases/download/v0.4.0/rigwatch_0.4.0_windows_arm64.zip) |
 
 ## Usage
 
@@ -65,90 +75,42 @@ rigwatch agent --listen :7777 --token "$RIGWATCH_TOKEN"
 | `esc` | Close the overlay, or quit |
 | `tab` / `shift+tab` | Next / previous host |
 | `p` | Processes |
-| `c` / `m` / `g` | Sort processes by CPU, memory, or GPU |
-| `a` | Alert history |
+| `j` / `k`, arrows | Select a process |
+| `c` | Sort by CPU |
+| `m` | Sort by memory (RSS; working set on Windows) |
+| `g` | Sort by GPU utilization |
+| `G` | Sort by GPU memory |
+| `x`, then `y` | SIGTERM the selected process |
+| `x`, then `9`, then `y` | SIGKILL |
+| `n` | Cancel the kill prompt |
+| `a` | Alert history for this session |
 | `?` | Help |
 
-## Config
+The top three rows for the current sort are marked 1–3.
 
-Flags override YAML. Lookup order is `--config`, then `$RIGWATCH_CONFIG`, then `~/.config/rigwatch/config.yaml` when that file exists.
+`x` asks before it signals, and only on the machine you are sitting at. `--demo` and `rigwatch connect` do not send a signal. macOS and Linux need you to own the process (or root); otherwise the row says `access denied` and the process keeps running. Windows uses `taskkill`, and `9` adds `/F`.
 
-Copy [`rigwatch.example.yaml`](rigwatch.example.yaml). Thresholds color the panels. Alerts use those limits, and a rolling baseline.
+CPU, memory, GPU, and temperature panels draw a labeled sparkline.
 
-```yaml
-thresholds:
-  temp_amber: 75
-  temp_red: 85
-  cpu_warn: 90
-  mem_warn: 90
-  gpu_util_warn: 95
-  disk_warn: 90
-  fan_pct_warn: 95
-  fan_rpm_warn: 0
-alerts:
-  enabled: true
-  bell: true
-  command: "notify-send rigwatch \"$RIGWATCH_KEY $RIGWATCH_VALUE\""
-  cooldown: 2m
-  metrics: [cpu, memory, gpu, temp, disk, fan]
-  baseline:
-    enabled: true
-    window: 10m
-    sustain: 1m
-    margin_percent: 20
-    margin_temp: 10
-    margin_rpm: 400
-    min_samples: 12
-```
+A host is marked `stale` when no sample arrives for `stale_after` (default three intervals, at least 3s). A dropped SSH or agent link shows `reconnect` and retries after 1s, then 2s, up to 30s. `--stale-after` overrides the file. Set it above a remote agent's sample interval.
 
-CPU and GPU temperatures follow `temp_amber` / `temp_red` unless `cpu_temp_*` or `gpu_temp_*` is set. `fan_rpm_warn: 0` leaves RPM off. `metrics` limits which signals are watched.
+`a` lists the alerts from this session: time, host, metric, and level. Nothing is written to disk. `alerts.history` defaults to 32, and `0` disables the list.
 
-The baseline is the mean of CPU, memory, GPU, temperature, and fan samples inside `window`, excluding the current point. Disks use the fixed percent only. It alerts when a reading stays above that mean by the margin (`margin_percent`, `margin_temp`, or `margin_rpm`) for `sustain`. `min_samples` is how many points the mean needs first.
+`profile` or `--profile` loads a named panel layout and threshold overlay from `profiles`. Flags still win. Panel names are `cpu`, `gpu`, `mem`, `temp`, `fan`, `disk`, and `net`.
 
-The same alert does not repeat until the reading recovers and `cooldown` has passed (default 2m). Amber rising to red still notifies. The banner clears on recovery. `cooldown: 0` re-arms as soon as the reading recovers.
+GPU% and VRAM columns appear when `nvidia-smi` reports them. Utilization comes from `pmon` in the background, and VRAM from the compute-apps query. Apple and AMD GPUs leave those columns hidden.
 
-The TUI draws a one-line banner, a status count, and highlights the panel. It rings the bell (BEL) and runs `command` when those are set. The agent writes an `alert` event on stdio, SSE (`event: alert`), and WebSocket, and runs `command` too. Snapshot frames are unchanged. WebSocket samples stay bare JSON. An alert frame is `{"type":"alert","alert":{...}}`.
+## Alerts
 
-The command sees `RIGWATCH_HOST`, `RIGWATCH_KEY`, `RIGWATCH_LEVEL`, `RIGWATCH_KIND`, `RIGWATCH_METRIC`, `RIGWATCH_VALUE`, and `RIGWATCH_LIMIT`. The TUI and the agent each run it, so set the command on the side that should notify.
+Copy [`rigwatch.example.yaml`](rigwatch.example.yaml). Flags override the file. Lookup is `--config`, then `$RIGWATCH_CONFIG`, then `~/.config/rigwatch/config.yaml` when that file exists.
 
-`a` lists the last alerts for this session: time, host, metric, level. `alerts.history` is how many to keep (default 32, `0` disables it). The list stays in memory. It is not written to disk.
+Thresholds color the panels and fire when a reading crosses them: temperature (`temp_amber` / `temp_red`), CPU, memory, GPU, disk, and fan. CPU and GPU temperatures follow the shared limits unless `cpu_temp_*` or `gpu_temp_*` is set. `fan_rpm_warn: 0` leaves RPM off. `metrics` limits which signals are watched.
 
-## Trends
+The baseline is the mean of samples inside `window`, excluding the current point. It alerts when a reading stays above that mean by the margin (`margin_percent`, `margin_temp`, or `margin_rpm`) for `sustain`. Disks use the fixed percent only. `min_samples` is how many points the mean needs first.
 
-CPU, GPU, memory, and temperature panels draw a one-line sparkline, labeled `cpu`, `gpu`, `mem`, and `temp`. The line is the recent samples on this screen. A gap is a missing reading.
+The TUI draws a one-line banner, a status count, and highlights the panel. `a` opens the same alerts after the banner clears. It rings the bell and runs `command` when those are set. The same alert waits until the reading recovers and `cooldown` has passed (default 2m). Amber rising to red still notifies. The banner clears on recovery. `cooldown: 0` re-arms as soon as the reading recovers.
 
-## Stale hosts
-
-If no sample arrives for `stale_after` (default three intervals, at least 3s), the header says `stale` and the panels lose their live border. A dropped SSH or agent link is marked stale immediately and shows `reconnect`. The client dials again on its own, waiting 1s, then 2s, up to 30s. `--stale-after` overrides the config key. On a remote agent, set it above that agent's sample interval.
-
-## Profiles
-
-`profile` or `--profile` loads a named layout. The profile chooses which panels appear and overlays thresholds on the top-level ones. Flags still win. Omit the name to show every panel.
-
-```bash
-rigwatch --profile gaming
-```
-
-```yaml
-profile: gaming
-profiles:
-  gaming:
-    panels: [cpu, gpu, mem, temp]
-    thresholds:
-      temp_red: 95
-      gpu_util_warn: 99
-  render:
-    panels: [cpu, gpu, mem, temp, disk, fan]
-    thresholds:
-      temp_amber: 70
-      temp_red: 82
-```
-
-Panel names are `cpu`, `gpu`, `mem`, `temp`, `fan`, `disk`, and `net`.
-
-## Processes
-
-`p` opens the process list. `c`, `m`, and `g` sort by CPU, memory, and GPU. When `nvidia-smi` is installed, GPU% comes from `pmon` and VRAM from compute-app memory. Both columns stay hidden when that data is missing, including machines without an NVIDIA driver. The lookup runs beside the sample so the one-second `pmon` delay does not freeze the UI. Apple and AMD GPUs do not fill these columns.
+The agent writes `{"type":"alert","alert":{...}}` on stdio and WebSocket, and `event: alert` on SSE, and runs `command` too. Snapshot frames stay as they are. The command sees `RIGWATCH_HOST`, `RIGWATCH_KEY`, `RIGWATCH_LEVEL`, `RIGWATCH_KIND`, `RIGWATCH_METRIC`, `RIGWATCH_VALUE`, and `RIGWATCH_LIMIT`. The TUI and the agent each run it, so set the command on the side that should notify.
 
 ## Platforms
 

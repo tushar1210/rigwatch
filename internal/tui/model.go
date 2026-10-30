@@ -1,9 +1,9 @@
 package tui
 
 import (
+	"fmt"
 	"math"
 	"os"
-	"sort"
 	"time"
 
 	"github.com/charmbracelet/bubbles/help"
@@ -43,6 +43,8 @@ type Options struct {
 	Sources   []Source
 	Demo      bool
 	ExitAfter time.Duration
+	// Kill overrides process termination. sig is sigTerm (15) or sigKill (9).
+	Kill func(pid int32, sig int) error
 }
 
 // Model is the Bubble Tea model.
@@ -58,7 +60,11 @@ type Model struct {
 	showHelp   bool
 	showProc   bool
 	showAlerts bool
-	sortBy     int
+	sortBy     metrics.ProcessSort
+	procRows   []metrics.Process
+	kill       func(pid int32, sig int) error
+	killAsk    *killAsk
+	procNote   string
 	demo       bool
 	exitAfter  time.Duration
 	staleAfter time.Duration
@@ -66,12 +72,6 @@ type Model struct {
 	history    []alert.Event
 	ready      bool
 }
-
-const (
-	sortByCPU = iota
-	sortByMem
-	sortByGPU
-)
 
 type sourceState struct {
 	name         string
@@ -93,6 +93,10 @@ type history struct {
 }
 
 type exitNow struct{}
+
+type tickMsg struct {
+	now time.Time
+}
 
 // New builds a model. Sources must contain at least one entry.
 func New(opts Options) Model {
@@ -135,12 +139,17 @@ func New(opts Options) Model {
 	st.Cell = lipgloss.NewStyle().Foreground(lipgloss.Color(colorText)).Padding(0, 1)
 	st.Selected = lipgloss.NewStyle().Foreground(lipgloss.Color(colorAccent)).Bold(true).Padding(0, 1)
 	tbl.SetStyles(st)
+	kill := opts.Kill
+	if kill == nil {
+		kill = killPID
+	}
 	return Model{
 		cfg:        cfg,
 		sources:    states,
 		keys:       newKeys(),
 		help:       h,
 		table:      tbl,
+		kill:       kill,
 		demo:       opts.Demo,
 		exitAfter:  opts.ExitAfter,
 		staleAfter: cfg.EffectiveStaleAfter(),
@@ -161,10 +170,6 @@ func (m Model) scheduleTick() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg { return tickMsg{now: t} })
 }
 
-type tickMsg struct {
-	now time.Time
-}
-
 // Update implements tea.Model.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -173,7 +178,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.help.Width = msg.Width
 		m.ready = true
-		m.syncTable()
+		m.syncTable(true)
 		return m, nil
 	case tea.KeyMsg:
 		return m.onKey(msg)
@@ -196,13 +201,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.killAsk != nil && m.showProc {
+		return m.onKillKey(msg)
+	}
 	switch {
 	case key.Matches(msg, m.keys.Quit):
 		return m, tea.Quit
 	case key.Matches(msg, m.keys.Back):
 		if m.showHelp || m.showProc || m.showAlerts {
+			m.closeProc()
 			m.showHelp = false
-			m.showProc = false
 			m.showAlerts = false
 			m.help.ShowAll = false
 			return m, nil
@@ -212,50 +220,57 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.showHelp = !m.showHelp
 		m.help.ShowAll = m.showHelp
 		if m.showHelp {
-			m.showProc = false
+			m.closeProc()
 			m.showAlerts = false
 		}
 		return m, nil
 	case key.Matches(msg, m.keys.Alerts):
 		m.showAlerts = !m.showAlerts
 		if m.showAlerts {
+			m.closeProc()
 			m.showHelp = false
-			m.showProc = false
 			m.help.ShowAll = false
 		}
 		return m, nil
 	case key.Matches(msg, m.keys.Proc):
-		m.showProc = !m.showProc
 		if m.showProc {
-			m.showHelp = false
-			m.showAlerts = false
-			m.help.ShowAll = false
-			m.syncTable()
+			m.closeProc()
+			return m, nil
 		}
+		m.showProc = true
+		m.showHelp = false
+		m.showAlerts = false
+		m.help.ShowAll = false
+		m.syncTable(true)
 		return m, nil
 	case key.Matches(msg, m.keys.Next):
 		if len(m.sources) > 1 {
 			m.active = (m.active + 1) % len(m.sources)
-			m.syncTable()
+			m.syncTable(false)
 		}
 		return m, nil
 	case key.Matches(msg, m.keys.Prev):
 		if len(m.sources) > 1 {
 			m.active = (m.active - 1 + len(m.sources)) % len(m.sources)
-			m.syncTable()
+			m.syncTable(false)
 		}
 		return m, nil
 	case key.Matches(msg, m.keys.SortCPU):
-		m.sortBy = sortByCPU
-		m.syncTable()
+		m.setSort(metrics.SortByCPU)
 		return m, nil
 	case key.Matches(msg, m.keys.SortMem):
-		m.sortBy = sortByMem
-		m.syncTable()
+		m.setSort(metrics.SortByRSS)
 		return m, nil
 	case key.Matches(msg, m.keys.SortGPU):
-		m.sortBy = sortByGPU
-		m.syncTable()
+		m.setSort(metrics.SortByGPU)
+		return m, nil
+	case key.Matches(msg, m.keys.SortVRAM):
+		m.setSort(metrics.SortByVRAM)
+		return m, nil
+	case key.Matches(msg, m.keys.Kill):
+		if m.showProc {
+			m.armKill()
+		}
 		return m, nil
 	}
 	if m.showProc {
@@ -264,6 +279,105 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	return m, nil
+}
+
+func (m *Model) closeProc() {
+	m.showProc = false
+	m.killAsk = nil
+	m.procNote = ""
+}
+
+func (m *Model) setSort(by metrics.ProcessSort) {
+	if m.sortBy == by {
+		m.syncTable(true)
+		return
+	}
+	m.sortBy = by
+	m.table.SetCursor(0)
+	m.syncTable(false)
+}
+
+func (m Model) onKillKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, m.keys.Quit):
+		return m, tea.Quit
+	case key.Matches(msg, m.keys.Back), msg.String() == "n":
+		m.killAsk = nil
+		return m, nil
+	case msg.String() == "y":
+		return m.confirmKill()
+	case msg.String() == "9":
+		if m.killAsk != nil {
+			m.killAsk.sig = sigKill
+		}
+		return m, nil
+	default:
+		return m, nil
+	}
+}
+
+func (m *Model) armKill() {
+	m.procNote = ""
+	if m.demo {
+		m.procNote = "demo"
+		return
+	}
+	if kind := m.current().kind; kind != "" && kind != "local" {
+		m.procNote = "local only"
+		return
+	}
+	sel, ok := m.selectedProc()
+	if !ok || sel.PID <= 1 {
+		m.procNote = "refused"
+		return
+	}
+	m.killAsk = newKillAsk(sel.PID, sel.Name)
+}
+
+func (m Model) confirmKill() (tea.Model, tea.Cmd) {
+	ask := m.killAsk
+	m.killAsk = nil
+	if ask == nil {
+		return m, nil
+	}
+	if m.demo {
+		m.procNote = "demo"
+		return m, nil
+	}
+	if kind := m.current().kind; kind != "" && kind != "local" {
+		m.procNote = "local only"
+		return m, nil
+	}
+	sel, ok := m.selectedProc()
+	if !ok || sel.PID != ask.pid {
+		m.procNote = "process changed"
+		return m, nil
+	}
+	if sel.PID <= 1 {
+		m.procNote = "refused"
+		return m, nil
+	}
+	if m.kill == nil {
+		m.procNote = fmt.Sprintf("%d failed", ask.pid)
+		return m, nil
+	}
+	if err := m.kill(ask.pid, ask.sig); err != nil {
+		m.procNote = fmt.Sprintf("%d %s", ask.pid, killFailure(err))
+		return m, nil
+	}
+	m.procNote = fmt.Sprintf("sent %s %d", sigLabel(ask.sig), ask.pid)
+	return m, nil
+}
+
+func (m Model) selectedProc() (metrics.Process, bool) {
+	if len(m.procRows) == 0 {
+		return metrics.Process{}, false
+	}
+	i := m.table.Cursor()
+	if i < 0 || i >= len(m.procRows) {
+		return metrics.Process{}, false
+	}
+	return m.procRows[i], true
 }
 
 func (m Model) onSample(msg SampleMsg) (tea.Model, tea.Cmd) {
@@ -301,7 +415,7 @@ func (m Model) onSample(msg SampleMsg) (tea.Model, tea.Cmd) {
 	src.hist.gpu = appendCap(src.hist.gpu, gpu, 60)
 	src.hist.temp = appendCap(src.hist.temp, temp, 60)
 	if m.showProc && msg.Index == m.active {
-		m.syncTable()
+		m.syncTable(true)
 	}
 	host := src.name
 	evs := m.alerts.Evaluate(host, msg.Snap)
@@ -376,78 +490,40 @@ func sampleTemp(temps []metrics.Temp) float64 {
 	return best
 }
 
-func (m *Model) syncTable() {
-	snap := m.current().snap
-	rows := append([]metrics.Process(nil), snap.Processes...)
-	sort.Slice(rows, func(i, j int) bool {
-		switch m.sortBy {
-		case sortByMem:
-			return rows[i].MemPercent > rows[j].MemPercent
-		case sortByGPU:
-			return gpuSortKey(rows[i]) > gpuSortKey(rows[j])
-		default:
-			return rows[i].CPUPercent > rows[j].CPUPercent
+func (m *Model) syncTable(keepPID bool) {
+	var prev int32
+	if keepPID {
+		if sel, ok := m.selectedProc(); ok {
+			prev = sel.PID
 		}
-	})
-	showGPU, showVRAM := false, false
-	for _, p := range rows {
-		if p.HasGPU {
-			showGPU = true
+	}
+	rows := metrics.SortProcesses(m.current().snap.Processes, m.sortBy)
+	m.procRows = rows
+	body := make([]table.Row, len(rows))
+	for i, p := range rows {
+		body[i] = table.Row{p.Name}
+	}
+	m.table.SetRows(body)
+	if len(rows) == 0 {
+		return
+	}
+	idx := 0
+	if prev != 0 {
+		for i, p := range rows {
+			if p.PID == prev {
+				idx = i
+				break
+			}
 		}
-		if p.HasGPUMem {
-			showVRAM = true
-		}
+	}
+	m.table.SetCursor(idx)
+	h := m.height - 6
+	if h < 5 {
+		h = 5
 	}
 	width := m.width
 	if width < 40 {
 		width = 40
-	}
-	fixed := 8 + 8 + 8 + 10
-	if showGPU {
-		fixed += 8
-	}
-	if showVRAM {
-		fixed += 10
-	}
-	nameW := width - fixed - 6
-	if nameW < 12 {
-		nameW = 12
-	}
-	cols := []table.Column{
-		{Title: "PID", Width: 8},
-		{Title: "CPU", Width: 8},
-		{Title: "MEM", Width: 8},
-		{Title: "RSS", Width: 10},
-	}
-	if showGPU {
-		cols = append(cols, table.Column{Title: "GPU", Width: 8})
-	}
-	if showVRAM {
-		cols = append(cols, table.Column{Title: "VRAM", Width: 10})
-	}
-	cols = append(cols, table.Column{Title: "NAME", Width: nameW})
-	m.table.SetColumns(cols)
-	body := make([]table.Row, 0, len(rows))
-	for _, p := range rows {
-		row := table.Row{
-			itoa(int(p.PID)),
-			metrics.FormatPercent(p.CPUPercent),
-			metrics.FormatPercent(p.MemPercent),
-			metrics.FormatBytes(p.RSS),
-		}
-		if showGPU {
-			row = append(row, gpuCell(p))
-		}
-		if showVRAM {
-			row = append(row, vramCell(p))
-		}
-		row = append(row, p.Name)
-		body = append(body, row)
-	}
-	m.table.SetRows(body)
-	h := m.height - 6
-	if h < 5 {
-		h = 5
 	}
 	m.table.SetHeight(h)
 	m.table.SetWidth(width)
@@ -474,47 +550,4 @@ func ringBell() tea.Cmd {
 		_ = f.Close()
 		return nil
 	}
-}
-
-func gpuSortKey(p metrics.Process) float64 {
-	if !p.HasGPU {
-		return -1
-	}
-	return p.GPUPercent
-}
-
-func gpuCell(p metrics.Process) string {
-	if !p.HasGPU {
-		return "-"
-	}
-	return metrics.FormatPercent(p.GPUPercent)
-}
-
-func vramCell(p metrics.Process) string {
-	if !p.HasGPUMem {
-		return "-"
-	}
-	return metrics.FormatBytes(p.GPUMemBytes)
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var b [16]byte
-	i := len(b)
-	for n > 0 {
-		i--
-		b[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		b[i] = '-'
-	}
-	return string(b[i:])
 }

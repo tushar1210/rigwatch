@@ -1,11 +1,13 @@
 package tui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/tushar1210/rigwatch/internal/collect"
 	"github.com/tushar1210/rigwatch/internal/config"
@@ -101,8 +103,222 @@ func TestAlertBannerClears(t *testing.T) {
 	cool.Temps[0].Celsius = 50
 	updated, _ = updated.Update(SampleMsg{Index: 0, Snap: cool})
 	view = updated.View()
-	if strings.Contains(view, "alert") {
+	if strings.Contains(view, "1 alert") || strings.Contains(ansi.Strip(view), "alert  ") {
 		t.Fatalf("banner should clear:\n%s", view)
+	}
+}
+
+func sampleProcs() []metrics.Process {
+	return []metrics.Process{
+		{PID: 40, Name: "alpha", CPUPercent: 10, MemPercent: 80, RSS: 100},
+		{PID: 50, Name: "beta", CPUPercent: 40, MemPercent: 5, RSS: 5000, GPUPercent: 10, GPUUtilOK: true, GPUMem: 100, GPUMemOK: true},
+		{PID: 60, Name: "gamma", CPUPercent: 30, MemPercent: 4, RSS: 4000, GPUPercent: 90, GPUUtilOK: true, GPUMem: 50, GPUMemOK: true},
+		{PID: 70, Name: "delta", CPUPercent: 20, MemPercent: 3, RSS: 9000, GPUMemPctOK: true, GPUMemPercent: 70},
+	}
+}
+
+func procModel(rows []metrics.Process, kind string, demo bool, kill func(int32, int) error) Model {
+	m := New(Options{
+		Config:  config.Default(),
+		Demo:    demo,
+		Sources: []Source{{Name: "box", Kind: kind}},
+		Kill:    kill,
+	})
+	m.width = 100
+	m.height = 36
+	updated, _ := m.Update(SampleMsg{Index: 0, Snap: metrics.Snapshot{
+		Host:      metrics.Host{Hostname: "box"},
+		Processes: rows,
+	}})
+	m = updated.(Model)
+	updated, _ = m.Update(keyRune('p'))
+	return updated.(Model)
+}
+
+func keyRune(r rune) tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}}
+}
+
+func press(m Model, r rune) Model {
+	updated, _ := m.Update(keyRune(r))
+	return updated.(Model)
+}
+
+func plain(m Model) string {
+	return ansi.Strip(m.View())
+}
+
+func lineWith(view, name string) string {
+	for _, line := range strings.Split(view, "\n") {
+		if strings.Contains(line, name) {
+			return line
+		}
+	}
+	return ""
+}
+
+func TestProcessSortKeysAndTopThree(t *testing.T) {
+	m := procModel(sampleProcs(), "local", false, nil)
+	view := plain(m)
+	if !strings.Contains(m.View(), styleAccent().Render("1")) || !strings.Contains(m.View(), styleText().Bold(true).Render("2")) || !strings.Contains(m.View(), styleValue(colorAmber).Render("3")) {
+		t.Fatal("top 3 ranks are not colored")
+	}
+	if !strings.Contains(view, "by cpu") {
+		t.Fatalf("cpu label:\n%s", view)
+	}
+	if !strings.Contains(lineWith(view, "beta"), " 1 ") || !strings.Contains(lineWith(view, "gamma"), " 2 ") || !strings.Contains(lineWith(view, "delta"), " 3 ") {
+		t.Fatalf("cpu ranks:\n%s", view)
+	}
+	if strings.Contains(lineWith(view, "alpha"), " 4 ") {
+		t.Fatalf("fourth row should not be ranked:\n%s", view)
+	}
+
+	m = press(m, 'm')
+	view = plain(m)
+	if !strings.Contains(view, "by memory") {
+		t.Fatalf("memory label:\n%s", view)
+	}
+	if !strings.Contains(lineWith(view, "delta"), " 1 ") || !strings.Contains(lineWith(view, "beta"), " 2 ") {
+		t.Fatalf("rss ranks:\n%s", view)
+	}
+	if strings.Contains(lineWith(view, "alpha"), " 1 ") {
+		t.Fatalf("low rss ranked first:\n%s", view)
+	}
+
+	m = press(m, 'g')
+	view = plain(m)
+	if !strings.Contains(view, "by gpu") || !strings.Contains(lineWith(view, "gamma"), " 1 ") || !strings.Contains(lineWith(view, "beta"), " 2 ") {
+		t.Fatalf("gpu order:\n%s", view)
+	}
+
+	m = press(m, 'G')
+	view = plain(m)
+	if !strings.Contains(view, "by vram") || !strings.Contains(lineWith(view, "beta"), " 1 ") {
+		t.Fatalf("vram order:\n%s", view)
+	}
+	if strings.Contains(view, "VRAM") == false {
+		t.Fatalf("missing vram column:\n%s", view)
+	}
+}
+
+func TestProcessKillConfirmAndPermission(t *testing.T) {
+	var gotPID int32
+	var gotSig int
+	calls := 0
+	m := procModel(sampleProcs(), "local", false, func(pid int32, sig int) error {
+		calls++
+		gotPID = pid
+		gotSig = sig
+		return nil
+	})
+	m = press(m, 'y')
+	if calls != 0 {
+		t.Fatal("y without confirm killed")
+	}
+	m = press(m, 'x')
+	if !strings.Contains(plain(m), "TERM 50 beta") || !strings.Contains(plain(m), "9 kill") {
+		t.Fatalf("confirm:\n%s", plain(m))
+	}
+	m = press(m, 'y')
+	if calls != 1 || gotPID != 50 || gotSig != sigTerm {
+		t.Fatalf("term pid=%d sig=%d calls=%d", gotPID, gotSig, calls)
+	}
+	m = press(m, 'x')
+	m = press(m, 'n')
+	if calls != 1 || strings.Contains(plain(m), "TERM") {
+		t.Fatalf("cancel still armed:\n%s", plain(m))
+	}
+
+	m = press(m, 'x')
+	m = press(m, '9')
+	if !strings.Contains(plain(m), "KILL 50 beta") {
+		t.Fatalf("sigkill prompt:\n%s", plain(m))
+	}
+	m = press(m, 'y')
+	if calls != 2 || gotPID != 50 || gotSig != sigKill {
+		t.Fatalf("kill pid=%d sig=%d calls=%d", gotPID, gotSig, calls)
+	}
+	if !strings.Contains(plain(m), "sent KILL 50") {
+		t.Fatalf("sent note:\n%s", plain(m))
+	}
+	m = press(press(m, 'j'), 'x')
+	if !strings.Contains(plain(m), "TERM 60 gamma") {
+		t.Fatalf("selected row:\n%s", plain(m))
+	}
+	cancelled := plain(press(m, 'n'))
+	if calls != 2 || strings.Contains(cancelled, "TERM") {
+		t.Fatalf("cancel after selection:\n%s", cancelled)
+	}
+
+	m = procModel(sampleProcs(), "local", false, func(int32, int) error {
+		return errors.New("operation not permitted")
+	})
+	m = press(press(m, 'x'), 'y')
+	if !strings.Contains(plain(m), "50 access denied") {
+		t.Fatalf("permission:\n%s", plain(m))
+	}
+
+	called := false
+	m = procModel(sampleProcs(), "ws", false, func(int32, int) error {
+		called = true
+		return nil
+	})
+	m = press(m, 'x')
+	if called || !strings.Contains(plain(m), "local only") {
+		t.Fatalf("remote:\n%s", plain(m))
+	}
+
+	m = procModel(sampleProcs(), "local", true, func(int32, int) error {
+		called = true
+		return nil
+	})
+	m = press(m, 'x')
+	if called || !strings.Contains(plain(m), "demo") {
+		t.Fatalf("demo:\n%s", plain(m))
+	}
+}
+
+func TestRefuseInitPID(t *testing.T) {
+	called := false
+	rows := []metrics.Process{{PID: 1, Name: "init", CPUPercent: 1, RSS: 10}}
+	m := procModel(rows, "local", false, func(int32, int) error {
+		called = true
+		return nil
+	})
+	m = press(m, 'x')
+	if called || !strings.Contains(plain(m), "refused") {
+		t.Fatalf("pid 1:\n%s", plain(m))
+	}
+}
+
+func TestKillEscStaysOnProcesses(t *testing.T) {
+	m := procModel(sampleProcs(), "local", false, func(int32, int) error { return nil })
+	m = press(m, 'x')
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(Model)
+	if !m.showProc || m.killAsk != nil {
+		t.Fatalf("esc should cancel confirm, showProc=%v ask=%v", m.showProc, m.killAsk)
+	}
+}
+
+func TestNoGPUColumnWithoutStats(t *testing.T) {
+	rows := []metrics.Process{{PID: 40, Name: "alpha", CPUPercent: 1, RSS: 10}}
+	m := procModel(rows, "local", false, nil)
+	if strings.Contains(plain(m), "VRAM") {
+		t.Fatalf("empty gpu column:\n%s", plain(m))
+	}
+}
+
+func TestHotTempIsMarked(t *testing.T) {
+	m := New(Options{Config: config.Default(), Sources: []Source{{Name: "local"}}})
+	m.width = 100
+	m.height = 40
+	snap := collect.DemoSnapshot(1)
+	snap.Temps[0].Celsius = 90
+	updated, _ := m.Update(SampleMsg{Index: 0, Snap: snap})
+	view := updated.View()
+	if !strings.Contains(view, "90") {
+		t.Fatal("expected hot temperature in the view")
 	}
 }
 
@@ -169,11 +385,11 @@ func TestProcessGPUColumns(t *testing.T) {
 	if !strings.Contains(m.View(), "by gpu") {
 		t.Fatal("gpu sort")
 	}
-	plain := New(Options{Config: config.Default(), Sources: []Source{{Name: "local"}}})
-	plain.width = 100
-	plain.height = 30
+	plainSnap := New(Options{Config: config.Default(), Sources: []Source{{Name: "local"}}})
+	plainSnap.width = 100
+	plainSnap.height = 30
 	snap := metrics.Snapshot{Processes: []metrics.Process{{PID: 1, Name: "sleep", CPUPercent: 1, MemPercent: 1, RSS: 4096}}}
-	updated, _ = plain.Update(SampleMsg{Index: 0, Snap: snap})
+	updated, _ = plainSnap.Update(SampleMsg{Index: 0, Snap: snap})
 	updated, _ = updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
 	view = updated.View()
 	if strings.Contains(view, "GPU") || strings.Contains(view, "VRAM") {
@@ -200,7 +416,7 @@ func TestAlertHistory(t *testing.T) {
 	cool.Temps[0].Celsius = 40
 	updated, _ = m.Update(SampleMsg{Index: 0, Snap: cool})
 	m = updated.(Model)
-	if strings.Contains(m.View(), "alert") {
+	if strings.Contains(m.View(), "1 alert") || strings.Contains(ansi.Strip(m.View()), "alert  ") {
 		t.Fatalf("banner should clear:\n%s", m.View())
 	}
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
@@ -218,18 +434,5 @@ func TestAlertHistory(t *testing.T) {
 	m = updated.(Model)
 	if !strings.Contains(m.View(), "cpu") || m.showAlerts {
 		t.Fatal("esc should return to the dashboard")
-	}
-}
-
-func TestHotTempIsMarked(t *testing.T) {
-	m := New(Options{Config: config.Default(), Sources: []Source{{Name: "local"}}})
-	m.width = 100
-	m.height = 40
-	snap := collect.DemoSnapshot(1)
-	snap.Temps[0].Celsius = 90
-	updated, _ := m.Update(SampleMsg{Index: 0, Snap: snap})
-	view := updated.View()
-	if !strings.Contains(view, "90") {
-		t.Fatal("expected hot temperature in the view")
 	}
 }
