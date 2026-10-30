@@ -61,3 +61,29 @@ func TestReadSnapshotsSkipsAlerts(t *testing.T) {
 		t.Fatalf("frame %+v %v", frame, err)
 	}
 }
+
+func TestShutdownRequestShape(t *testing.T) {
+	var buf strings.Builder
+	if err := WriteShutdown(&buf); err != nil {
+		t.Fatal(err)
+	}
+	line := []byte(strings.TrimSpace(buf.String()))
+	if !IsShutdownRequest(line) {
+		t.Fatalf("request = %s", line)
+	}
+	if err := WriteShutdownResult(&buf, jsonStringErr("must be root")); err != nil {
+		t.Fatal(err)
+	}
+	rest := strings.TrimSpace(buf.String()[strings.Index(buf.String(), "\n")+1:])
+	if IsShutdownRequest([]byte(rest)) {
+		t.Fatalf("result looked like a request: %s", rest)
+	}
+	frame, err := DecodeFrame([]byte(rest))
+	if err != nil || frame.Type != "shutdown" || frame.OK || frame.Error != "must be root" {
+		t.Fatalf("frame %+v %v", frame, err)
+	}
+}
+
+type jsonStringErr string
+
+func (e jsonStringErr) Error() string { return string(e) }

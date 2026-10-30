@@ -45,6 +45,8 @@ type Options struct {
 	ExitAfter time.Duration
 	// Kill overrides process termination. sig is sigTerm (15) or sigKill (9).
 	Kill func(pid int32, sig int) error
+	// Shutdown powers off one source. index is the host in Sources.
+	Shutdown func(index int) error
 }
 
 // Model is the Bubble Tea model.
@@ -65,6 +67,9 @@ type Model struct {
 	kill       func(pid int32, sig int) error
 	killAsk    *killAsk
 	procNote   string
+	powerAsk   bool
+	powerNote  string
+	shutdown   func(index int) error
 	demo       bool
 	exitAfter  time.Duration
 	staleAfter time.Duration
@@ -150,6 +155,7 @@ func New(opts Options) Model {
 		help:       h,
 		table:      tbl,
 		kill:       kill,
+		shutdown:   opts.Shutdown,
 		demo:       opts.Demo,
 		exitAfter:  opts.ExitAfter,
 		staleAfter: cfg.EffectiveStaleAfter(),
@@ -191,6 +197,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.scheduleTick()
 	case exitNow:
 		return m, tea.Quit
+	case powerResult:
+		if msg.err != nil {
+			m.powerNote = shutdownNote(msg.err)
+		} else {
+			m.powerNote = "shutting down"
+		}
+		return m, nil
 	}
 	if m.showProc {
 		var cmd tea.Cmd
@@ -201,6 +214,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.powerAsk {
+		return m.onPowerKey(msg)
+	}
 	if m.killAsk != nil && m.showProc {
 		return m.onKillKey(msg)
 	}
@@ -246,14 +262,19 @@ func (m Model) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Next):
 		if len(m.sources) > 1 {
 			m.active = (m.active + 1) % len(m.sources)
+			m.powerAsk = false
 			m.syncTable(false)
 		}
 		return m, nil
 	case key.Matches(msg, m.keys.Prev):
 		if len(m.sources) > 1 {
 			m.active = (m.active - 1 + len(m.sources)) % len(m.sources)
+			m.powerAsk = false
 			m.syncTable(false)
 		}
+		return m, nil
+	case key.Matches(msg, m.keys.Power):
+		m.armPower()
 		return m, nil
 	case key.Matches(msg, m.keys.SortCPU):
 		m.setSort(metrics.SortByCPU)
@@ -314,6 +335,65 @@ func (m Model) onKillKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	default:
 		return m, nil
 	}
+}
+
+type powerResult struct {
+	err error
+}
+
+func (m Model) onPowerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, m.keys.Quit):
+		return m, tea.Quit
+	case key.Matches(msg, m.keys.Back), msg.String() == "n":
+		m.powerAsk = false
+		return m, nil
+	case msg.String() == "y":
+		return m.confirmPower()
+	default:
+		return m, nil
+	}
+}
+
+func (m *Model) armPower() {
+	m.powerNote = ""
+	if m.demo {
+		m.powerNote = "demo"
+		return
+	}
+	m.closeProc()
+	m.showAlerts = false
+	m.showHelp = false
+	m.help.ShowAll = false
+	m.powerAsk = true
+}
+
+func (m Model) confirmPower() (tea.Model, tea.Cmd) {
+	m.powerAsk = false
+	if m.demo {
+		m.powerNote = "demo"
+		return m, nil
+	}
+	if m.shutdown == nil {
+		m.powerNote = "failed"
+		return m, nil
+	}
+	idx := m.active
+	fn := m.shutdown
+	m.powerNote = "shutting down"
+	return m, func() tea.Msg {
+		return powerResult{err: fn(idx)}
+	}
+}
+
+func shutdownNote(err error) string {
+	if err == nil {
+		return "shutting down"
+	}
+	if err.Error() == "not connected" || err.Error() == "demo" {
+		return err.Error()
+	}
+	return killFailure(err)
 }
 
 func (m *Model) armKill() {

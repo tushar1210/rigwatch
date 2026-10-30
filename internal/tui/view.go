@@ -78,6 +78,12 @@ func (m Model) renderHeader() string {
 		extra += "\n" + banner
 	}
 	switch {
+	case m.powerAsk:
+		extra += "\n" + styleValue(colorRed).Render("SHUT DOWN "+host+"?  y  n")
+	case m.powerNote != "":
+		extra += "\n" + styleValue(colorAmber).Render(m.powerNote)
+	}
+	switch {
 	case src.err != "" && src.err != "reconnecting":
 		label := "down"
 		if src.reconnecting {
@@ -115,7 +121,7 @@ func (m Model) renderHelp() string {
 	lines := []string{
 		styleAccent().Render("keys"),
 		styleDim().Render("q quit    esc back    tab host    p processes    a alerts"),
-		styleDim().Render("c cpu   m mem   g gpu   G vram   x kill   ? close"),
+		styleDim().Render("c cpu   m mem   g gpu   G vram   x kill   ! shut down   ? close"),
 		"",
 		styleAccent().Render("thresholds"),
 		styleDim().Render(fmt.Sprintf("temp amber %.0f°C    red %.0f°C", th.TempAmber, th.TempRed)),
@@ -131,6 +137,7 @@ func (m Model) renderHelp() string {
 		lines = append(lines, styleDim().Render("profile "+m.cfg.Profile))
 	}
 	lines = append(lines, styleDim().Render("stale host reconnects on its own"))
+	lines = append(lines, styleDim().Render("! then y powers off the selected host"))
 	return strings.Join(lines, "\n")
 }
 

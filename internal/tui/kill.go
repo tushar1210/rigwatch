@@ -45,7 +45,7 @@ func killFailure(err error) string {
 	}
 	low := strings.ToLower(err.Error())
 	switch {
-	case strings.Contains(low, "access is denied") || strings.Contains(low, "operation not permitted") || strings.Contains(low, "not permitted") || strings.Contains(low, "permission denied"):
+	case strings.Contains(low, "access is denied") || strings.Contains(low, "operation not permitted") || strings.Contains(low, "not permitted") || strings.Contains(low, "permission denied") || strings.Contains(low, "must be root"):
 		return "access denied"
 	case strings.Contains(low, "no such process") || strings.Contains(low, "not found"):
 		return "not running"

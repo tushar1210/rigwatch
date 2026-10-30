@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/tushar1210/rigwatch/internal/alert"
 	"github.com/tushar1210/rigwatch/internal/metrics"
@@ -16,10 +17,13 @@ var errSkipFrame = errors.New("skip frame")
 
 // Envelope is one line on the stdio stream and one WebSocket text frame.
 // Snapshot samples keep their existing shape. Alert lines use type "alert".
+// A shutdown request is {"type":"shutdown"}. A refusal is the same type with ok false.
 type Envelope struct {
 	Type     string            `json:"type"`
 	Snapshot *metrics.Snapshot `json:"snapshot,omitempty"`
 	Alert    *alert.Event      `json:"alert,omitempty"`
+	OK       *bool             `json:"ok,omitempty"`
+	Error    string            `json:"error,omitempty"`
 }
 
 // Frame is a decoded stream message.
@@ -27,6 +31,8 @@ type Frame struct {
 	Type     string
 	Snapshot metrics.Snapshot
 	Alert    *alert.Event
+	OK       bool
+	Error    string
 }
 
 // WriteSnapshot writes one NDJSON snapshot envelope.
@@ -57,6 +63,12 @@ func DecodeFrame(line []byte) (Frame, error) {
 			return Frame{Type: "snapshot"}, nil
 		}
 		return Frame{Type: "snapshot", Snapshot: *env.Snapshot}, nil
+	case "shutdown":
+		ok := false
+		if env.OK != nil {
+			ok = *env.OK
+		}
+		return Frame{Type: "shutdown", OK: ok, Error: env.Error}, nil
 	case "":
 		var snap metrics.Snapshot
 		if err := json.Unmarshal(line, &snap); err != nil {
@@ -66,6 +78,45 @@ func DecodeFrame(line []byte) (Frame, error) {
 	default:
 		return Frame{Type: env.Type}, nil
 	}
+}
+
+// WriteShutdown writes a host power-off request.
+func WriteShutdown(w io.Writer) error {
+	return json.NewEncoder(w).Encode(Envelope{Type: "shutdown"})
+}
+
+// IsShutdownRequest reports whether line asks the agent to power off.
+// A result frame (ok set) is not a request.
+func IsShutdownRequest(line []byte) bool {
+	var env Envelope
+	if err := json.Unmarshal(line, &env); err != nil {
+		return false
+	}
+	return env.Type == "shutdown" && env.OK == nil
+}
+
+// WriteShutdownResult tells the client the power-off was refused.
+func WriteShutdownResult(w io.Writer, err error) error {
+	ok := false
+	return json.NewEncoder(w).Encode(Envelope{Type: "shutdown", OK: &ok, Error: shutdownErrText(err)})
+}
+
+func shutdownErrText(err error) string {
+	if err == nil {
+		return "shutdown failed"
+	}
+	s := strings.TrimSpace(err.Error())
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	r := []rune(s)
+	if len(r) > 80 {
+		s = string(r[:79]) + "…"
+	}
+	if s == "" {
+		return "shutdown failed"
+	}
+	return s
 }
 
 // ReadSnapshots decodes NDJSON envelopes or bare snapshots until EOF.
