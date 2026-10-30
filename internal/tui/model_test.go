@@ -244,9 +244,9 @@ func TestProcessKillConfirmAndPermission(t *testing.T) {
 	if !strings.Contains(plain(m), "TERM 60 gamma") {
 		t.Fatalf("selected row:\n%s", plain(m))
 	}
-	m = press(m, 'n')
-	if calls != 2 {
-		t.Fatal("selection confirm sent a signal")
+	cancelled := plain(press(m, 'n'))
+	if calls != 2 || strings.Contains(cancelled, "TERM") {
+		t.Fatalf("cancel after selection:\n%s", cancelled)
 	}
 
 	m = procModel(sampleProcs(), "local", false, func(int32, int) error {
