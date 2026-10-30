@@ -29,6 +29,8 @@ func (m Model) View() string {
 	switch {
 	case m.showHelp:
 		body = m.renderHelp()
+	case m.showAlerts:
+		body = m.renderAlerts()
 	case m.showProc:
 		body = m.renderProcs()
 	default:
@@ -53,6 +55,12 @@ func (m Model) renderHeader() string {
 		b.WriteString("  ")
 	}
 	b.WriteString(styleText().Render(host))
+	if src.stale {
+		b.WriteString(styleValue(colorAmber).Render("  stale"))
+	}
+	if src.reconnecting {
+		b.WriteString(styleDim().Render("  reconnect"))
+	}
 	if snap.Host.OS != "" || snap.Host.Platform != "" {
 		b.WriteString(styleDim().Render("  " + snap.Host.PlatformLine()))
 	}
@@ -67,10 +75,21 @@ func (m Model) renderHeader() string {
 	if banner := m.alertBanner(host); banner != "" {
 		extra += "\n" + banner
 	}
-	if src.err != "" {
-		extra += "\n" + styleValue(colorRed).Render("down") + styleDim().Render("  "+src.err)
-	} else if notes := metrics.DedupNotes(snap.Notes); len(notes) > 0 {
-		extra += "\n" + styleDim().Render(ansi.Truncate(strings.Join(notes, " · "), m.width, "…"))
+	switch {
+	case src.err != "" && src.err != "reconnecting":
+		label := "down"
+		if src.reconnecting {
+			label = "reconnect"
+		}
+		if src.stale {
+			extra += "\n" + styleDim().Render(ansi.Truncate(src.err, m.width, "…"))
+		} else {
+			extra += "\n" + styleValue(colorRed).Render(label) + styleDim().Render("  "+ansi.Truncate(src.err, max(8, m.width-12), "…"))
+		}
+	case !src.stale:
+		if notes := metrics.DedupNotes(snap.Notes); len(notes) > 0 {
+			extra += "\n" + styleDim().Render(ansi.Truncate(strings.Join(notes, " · "), m.width, "…"))
+		}
 	}
 	rule := styleFaint().Render(strings.Repeat("─", max(1, m.width)))
 	return line + extra + "\n" + rule
@@ -88,8 +107,8 @@ func (m Model) renderHelp() string {
 	th := m.cfg.Threshold
 	lines := []string{
 		styleAccent().Render("keys"),
-		styleDim().Render("q quit    esc back    tab host    p processes"),
-		styleDim().Render("c sort by cpu    m sort by memory    ? close help"),
+		styleDim().Render("q quit    esc back    tab host    p processes    a alerts"),
+		styleDim().Render("c cpu    m mem    g gpu    ? close help"),
 		"",
 		styleAccent().Render("thresholds"),
 		styleDim().Render(fmt.Sprintf("temp amber %.0f°C    red %.0f°C", th.TempAmber, th.TempRed)),
@@ -99,7 +118,12 @@ func (m Model) renderHelp() string {
 	}
 	if m.cfg.Alerts.Enabled {
 		lines = append(lines, styleDim().Render("alerts on a crossing or baseline, then cooldown"))
+		lines = append(lines, styleDim().Render("a last alerts, kept in memory for this session"))
 	}
+	if m.cfg.Profile != "" {
+		lines = append(lines, styleDim().Render("profile "+m.cfg.Profile))
+	}
+	lines = append(lines, styleDim().Render("stale host reconnects on its own"))
 	return strings.Join(lines, "\n")
 }
 
@@ -112,12 +136,46 @@ func (m Model) renderProcs() string {
 		return styleDim().Render("no processes")
 	}
 	title := styleAccent().Render("processes")
-	if m.sortMem {
+	switch m.sortBy {
+	case sortByMem:
 		title += styleDim().Render("  by memory")
-	} else {
+	case sortByGPU:
+		title += styleDim().Render("  by gpu")
+	default:
 		title += styleDim().Render("  by cpu")
 	}
 	return title + "\n" + m.table.View()
+}
+
+func (m Model) renderAlerts() string {
+	lines := []string{styleAccent().Render("alerts")}
+	if len(m.history) == 0 {
+		lines = append(lines, styleDim().Render("none"))
+		return strings.Join(lines, "\n")
+	}
+	limit := m.height - 6
+	if limit < 3 {
+		limit = 3
+	}
+	start := len(m.history) - limit
+	if start < 0 {
+		start = 0
+	}
+	for i := len(m.history) - 1; i >= start; i-- {
+		ev := m.history[i]
+		metric := ev.Metric
+		if metric == "" {
+			metric = ev.Key
+		}
+		host := trunc(ev.Host, 12)
+		line := fmt.Sprintf("%s  %s  %s  %s", ev.At.Format("15:04:05"), pad(host, 12), pad(trunc(metric, 8), 8), ev.Level)
+		color := colorAmber
+		if ev.Level == "red" {
+			color = colorRed
+		}
+		lines = append(lines, styleValue(color).Render(ansi.Truncate(line, max(8, m.width), "…")))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m Model) renderDash() string {
@@ -128,32 +186,74 @@ func (m Model) renderDash() string {
 	if !src.seen {
 		return styleDim().Render("no sample yet")
 	}
-	if m.width >= 100 {
-		gap := 1
-		col := (m.width - gap) / 2
-		left := lipgloss.JoinVertical(lipgloss.Left,
-			m.cpuCard(col, src),
-			m.memCard(col, src),
-			m.diskCard(col, src),
-			m.netCard(col, src),
-		)
-		right := lipgloss.JoinVertical(lipgloss.Left,
-			m.gpuCard(col, src),
-			m.fanCard(col, src),
-			m.tempCard(col, src),
-		)
-		return lipgloss.JoinHorizontal(lipgloss.Top, left, " ", right)
+	type panel struct {
+		name string
+		col  int
+		draw func(int) string
 	}
 	w := m.width
-	return lipgloss.JoinVertical(lipgloss.Left,
-		m.cpuCard(w, src),
-		m.memCard(w, src),
-		m.gpuCard(w, src),
-		m.fanCard(w, src),
-		m.tempCard(w, src),
-		m.diskCard(w, src),
-		m.netCard(w, src),
-	)
+	col := w
+	wide := w >= 100
+	if wide {
+		col = (w - 1) / 2
+	}
+	all := []panel{
+		{name: "cpu", col: 0, draw: func(width int) string { return m.cpuCard(width, src) }},
+		{name: "mem", col: 0, draw: func(width int) string { return m.memCard(width, src) }},
+		{name: "gpu", col: 1, draw: func(width int) string { return m.gpuCard(width, src) }},
+		{name: "fan", col: 1, draw: func(width int) string { return m.fanCard(width, src) }},
+		{name: "temp", col: 1, draw: func(width int) string { return m.tempCard(width, src) }},
+		{name: "disk", col: 0, draw: func(width int) string { return m.diskCard(width, src) }},
+		{name: "net", col: 0, draw: func(width int) string { return m.netCard(width, src) }},
+	}
+	var left, right []string
+	var narrow []string
+	for _, p := range all {
+		if !m.showPanel(p.name) {
+			continue
+		}
+		if !wide {
+			narrow = append(narrow, p.draw(w))
+			continue
+		}
+		if p.col == 1 {
+			right = append(right, p.draw(col))
+		} else {
+			left = append(left, p.draw(col))
+		}
+	}
+	if !wide {
+		if len(narrow) == 0 {
+			return styleDim().Render("no panels")
+		}
+		return lipgloss.JoinVertical(lipgloss.Left, narrow...)
+	}
+	switch {
+	case len(left) == 0 && len(right) == 0:
+		return styleDim().Render("no panels")
+	case len(left) == 0:
+		return lipgloss.JoinVertical(lipgloss.Left, right...)
+	case len(right) == 0:
+		return lipgloss.JoinVertical(lipgloss.Left, left...)
+	default:
+		return lipgloss.JoinHorizontal(lipgloss.Top,
+			lipgloss.JoinVertical(lipgloss.Left, left...),
+			" ",
+			lipgloss.JoinVertical(lipgloss.Left, right...),
+		)
+	}
+}
+
+func (m Model) showPanel(name string) bool {
+	if len(m.cfg.Panels) == 0 {
+		return true
+	}
+	for _, p := range m.cfg.Panels {
+		if p == name {
+			return true
+		}
+	}
+	return false
 }
 
 func (m Model) cpuCard(width int, src sourceState) string {
@@ -182,7 +282,7 @@ func (m Model) cpuCard(width int, src sourceState) string {
 	inner := m.innerWidth(width)
 	var lines []string
 	lines = append(lines, title)
-	lines = append(lines, styleValue(colorAccent).Render(Sparkline(src.hist.cpu, inner)))
+	lines = append(lines, m.trend("cpu", src.hist.cpu, inner))
 	lines = append(lines, m.coreLines(snap.CPU.PerCore, inner)...)
 	return m.card(width, sev, lines...)
 }
@@ -210,7 +310,7 @@ func (m Model) memCard(width int, src sourceState) string {
 		label = "swap"
 	}
 	lines = append(lines, styleDim().Render(fmt.Sprintf("%s %s / %s", label, metrics.FormatBytes(mem.SwapUsed), metrics.FormatBytes(mem.SwapTotal))))
-	lines = append(lines, styleValue(colorAccent).Render(Sparkline(src.hist.mem, inner)))
+	lines = append(lines, m.trend("mem", src.hist.mem, inner))
 	return m.card(width, sev, lines...)
 }
 
@@ -260,8 +360,8 @@ func (m Model) gpuCard(width int, src sourceState) string {
 		core := labeledGauge("core", g.ClockCore, func(v float64) string { return metrics.FormatFixed(v, "") })
 		mem := labeledGauge("mem", g.ClockMem, func(v float64) string { return metrics.FormatFixed(v, " MHz") })
 		lines = append(lines, core+styleDim().Render("  ")+mem)
-		if i == 0 {
-			lines = append(lines, styleValue(colorAccent).Render(Sparkline(src.hist.gpu, inner)))
+		if i == 0 && hasFinite(src.hist.gpu) {
+			lines = append(lines, m.trend("gpu", src.hist.gpu, inner))
 		}
 		if g.Util.Available && g.Util.Value >= m.cfg.Threshold.GPUUtilWarn {
 			sev = worse(sev, sevAmber)
@@ -311,6 +411,9 @@ func (m Model) fanCard(width int, src sourceState) string {
 
 func (m Model) tempCard(width int, src sourceState) string {
 	lines := []string{styleAccent().Render("temps")}
+	if hasFinite(src.hist.temp) {
+		lines = append(lines, m.trend("temp", src.hist.temp, m.innerWidth(width)))
+	}
 	temps := src.snap.Temps
 	if len(temps) == 0 {
 		hint := "no temperature sensors"
@@ -382,13 +485,30 @@ func (m Model) netCard(width int, src sourceState) string {
 	return m.card(width, sevOK, lines...)
 }
 
+func (m Model) trend(label string, vals []float64, width int) string {
+	w := width - len(label) - 1
+	if w < 1 {
+		w = 1
+	}
+	spark := Sparkline(vals, w)
+	ink := styleValue(colorAccent)
+	if m.current().stale {
+		ink = styleDim()
+	}
+	return styleDim().Render(label) + " " + ink.Render(spark)
+}
+
 func (m Model) card(width int, sev severity, lines ...string) string {
 	border := colorBorder
-	switch sev {
-	case sevAmber:
+	if m.current().stale {
 		border = colorAmber
-	case sevRed:
-		border = colorRed
+	} else {
+		switch sev {
+		case sevAmber:
+			border = colorAmber
+		case sevRed:
+			border = colorRed
+		}
 	}
 	st := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).

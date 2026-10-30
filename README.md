@@ -65,7 +65,8 @@ rigwatch agent --listen :7777 --token "$RIGWATCH_TOKEN"
 | `esc` | Close the overlay, or quit |
 | `tab` / `shift+tab` | Next / previous host |
 | `p` | Processes |
-| `c` / `m` | Sort processes by CPU or memory |
+| `c` / `m` / `g` | Sort processes by CPU, memory, or GPU |
+| `a` | Alert history |
 | `?` | Help |
 
 ## Config
@@ -109,6 +110,45 @@ The same alert does not repeat until the reading recovers and `cooldown` has pas
 The TUI draws a one-line banner, a status count, and highlights the panel. It rings the bell (BEL) and runs `command` when those are set. The agent writes an `alert` event on stdio, SSE (`event: alert`), and WebSocket, and runs `command` too. Snapshot frames are unchanged. WebSocket samples stay bare JSON. An alert frame is `{"type":"alert","alert":{...}}`.
 
 The command sees `RIGWATCH_HOST`, `RIGWATCH_KEY`, `RIGWATCH_LEVEL`, `RIGWATCH_KIND`, `RIGWATCH_METRIC`, `RIGWATCH_VALUE`, and `RIGWATCH_LIMIT`. The TUI and the agent each run it, so set the command on the side that should notify.
+
+`a` lists the last alerts for this session: time, host, metric, level. `alerts.history` is how many to keep (default 32, `0` disables it). The list stays in memory. It is not written to disk.
+
+## Trends
+
+CPU, GPU, memory, and temperature panels draw a one-line sparkline, labeled `cpu`, `gpu`, `mem`, and `temp`. The line is the recent samples on this screen. A gap is a missing reading.
+
+## Stale hosts
+
+If no sample arrives for `stale_after` (default three intervals, at least 3s), the header says `stale` and the panels lose their live border. A dropped SSH or agent link is marked stale immediately and shows `reconnect`. The client dials again on its own, waiting 1s, then 2s, up to 30s. `--stale-after` overrides the config key. On a remote agent, set it above that agent's sample interval.
+
+## Profiles
+
+`profile` or `--profile` loads a named layout. The profile chooses which panels appear and overlays thresholds on the top-level ones. Flags still win. Omit the name to show every panel.
+
+```bash
+rigwatch --profile gaming
+```
+
+```yaml
+profile: gaming
+profiles:
+  gaming:
+    panels: [cpu, gpu, mem, temp]
+    thresholds:
+      temp_red: 95
+      gpu_util_warn: 99
+  render:
+    panels: [cpu, gpu, mem, temp, disk, fan]
+    thresholds:
+      temp_amber: 70
+      temp_red: 82
+```
+
+Panel names are `cpu`, `gpu`, `mem`, `temp`, `fan`, `disk`, and `net`.
+
+## Processes
+
+`p` opens the process list. `c`, `m`, and `g` sort by CPU, memory, and GPU. When `nvidia-smi` is installed, GPU% comes from `pmon` and VRAM from compute-app memory. Both columns stay hidden when that data is missing, including machines without an NVIDIA driver. The lookup runs beside the sample so the one-second `pmon` delay does not freeze the UI. Apple and AMD GPUs do not fill these columns.
 
 ## Platforms
 

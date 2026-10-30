@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/shirou/gopsutil/v4/cpu"
@@ -32,6 +33,12 @@ type Live struct {
 	prevDisk map[string]diskCount
 	prevNet  map[string]netCount
 	prevAt   time.Time
+
+	gpuMu      sync.Mutex
+	gpuStats   []gpuProcStat
+	gpuNext    time.Time
+	gpuBusy    bool
+	gpuMissing bool
 }
 
 type diskCount struct {
@@ -263,6 +270,7 @@ func (l *Live) fillProcs(ctx context.Context, snap *metrics.Snapshot) {
 			RSS:        rss,
 		})
 	}
+	rows = applyGPUProcs(rows, l.gpuProcessStats())
 	snap.Processes = topProcesses(rows, 12)
 }
 
@@ -292,6 +300,16 @@ func topProcesses(rows []metrics.Process, n int) []metrics.Process {
 	}
 	take(byCPU, n)
 	take(byMem, 8)
+	for _, p := range rows {
+		if !p.HasGPU && !p.HasGPUMem {
+			continue
+		}
+		if _, ok := seen[p.PID]; ok {
+			continue
+		}
+		seen[p.PID] = struct{}{}
+		out = append(out, p)
+	}
 	return out
 }
 

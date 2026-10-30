@@ -14,12 +14,25 @@ import (
 
 // Config is the runtime configuration.
 type Config struct {
-	Interval  time.Duration `yaml:"interval"`
-	Listen    string        `yaml:"listen"`
-	Token     string        `yaml:"token"`
-	LHMURL    string        `yaml:"lhm_url"`
-	Threshold Thresholds    `yaml:"thresholds"`
-	Alerts    Alerts        `yaml:"alerts"`
+	Interval   time.Duration      `yaml:"interval"`
+	Listen     string             `yaml:"listen"`
+	Token      string             `yaml:"token"`
+	LHMURL     string             `yaml:"lhm_url"`
+	StaleAfter time.Duration      `yaml:"stale_after"`
+	Profile    string             `yaml:"profile"`
+	Profiles   map[string]Profile `yaml:"profiles"`
+	Panels     []string           `yaml:"-"`
+	Threshold  Thresholds         `yaml:"thresholds"`
+	Alerts     Alerts             `yaml:"alerts"`
+
+	// baseThreshold is the file thresholds before a profile overlay.
+	baseThreshold Thresholds
+}
+
+// Profile is a named panel layout and threshold overlay.
+type Profile struct {
+	Panels    []string
+	Threshold Thresholds
 }
 
 // Thresholds control colour and alert edges.
@@ -68,6 +81,9 @@ type Alerts struct {
 	Cooldown time.Duration
 	Metrics  []string
 	Baseline Baseline
+	// History is how many notified alerts the TUI keeps in memory.
+	// Nothing is written to disk. Zero disables the list.
+	History int
 }
 
 // Allows reports whether metric should be evaluated.
@@ -100,7 +116,7 @@ type Baseline struct {
 
 // Default returns the built-in configuration.
 func Default() Config {
-	return Config{
+	cfg := Config{
 		Interval: time.Second,
 		Listen:   ":7777",
 		LHMURL:   "http://127.0.0.1:8085/data.json",
@@ -116,6 +132,7 @@ func Default() Config {
 		Alerts: Alerts{
 			Enabled:  true,
 			Cooldown: 2 * time.Minute,
+			History:  32,
 			Baseline: Baseline{
 				Enabled:       true,
 				Window:        10 * time.Minute,
@@ -127,15 +144,80 @@ func Default() Config {
 			},
 		},
 	}
+	cfg.baseThreshold = cfg.Threshold
+	return cfg
+}
+
+// EffectiveStaleAfter is how long a host may go without a sample before
+// the TUI marks it stale. An unset stale_after is three intervals, at least 3s.
+func (c Config) EffectiveStaleAfter() time.Duration {
+	if c.StaleAfter > 0 {
+		return c.StaleAfter
+	}
+	d := 3 * c.Interval
+	if d < 3*time.Second {
+		return 3 * time.Second
+	}
+	return d
+}
+
+// WithProfile overlays a named profile onto the base thresholds.
+// An empty name clears the overlay and shows every panel.
+func (c Config) WithProfile(name string) (Config, error) {
+	out := c
+	if out.baseThreshold == (Thresholds{}) {
+		out.baseThreshold = c.Threshold
+	}
+	out.Threshold = out.baseThreshold
+	out.Panels = nil
+	name = strings.TrimSpace(name)
+	if name == "" {
+		out.Profile = ""
+		if err := out.Validate(); err != nil {
+			return Config{}, err
+		}
+		return out, nil
+	}
+	spec, key, ok := out.findProfile(name)
+	if !ok {
+		return Config{}, fmt.Errorf("unknown profile %q", name)
+	}
+	out.Profile = key
+	out.Threshold = mergeThreshold(out.baseThreshold, spec.Threshold)
+	out.Panels = append([]string(nil), spec.Panels...)
+	if err := out.Validate(); err != nil {
+		return Config{}, err
+	}
+	return out, nil
+}
+
+func (c Config) findProfile(name string) (Profile, string, bool) {
+	if p, ok := c.Profiles[name]; ok {
+		return p, name, true
+	}
+	for k, p := range c.Profiles {
+		if strings.EqualFold(k, name) {
+			return p, k, true
+		}
+	}
+	return Profile{}, "", false
 }
 
 type fileConfig struct {
-	Interval  string      `yaml:"interval"`
-	Listen    string      `yaml:"listen"`
-	Token     string      `yaml:"token"`
-	LHMURL    string      `yaml:"lhm_url"`
-	Threshold Thresholds  `yaml:"thresholds"`
-	Alerts    *alertsFile `yaml:"alerts"`
+	Interval   string                 `yaml:"interval"`
+	Listen     string                 `yaml:"listen"`
+	Token      string                 `yaml:"token"`
+	LHMURL     string                 `yaml:"lhm_url"`
+	StaleAfter string                 `yaml:"stale_after"`
+	Profile    string                 `yaml:"profile"`
+	Profiles   map[string]profileFile `yaml:"profiles"`
+	Threshold  Thresholds             `yaml:"thresholds"`
+	Alerts     *alertsFile            `yaml:"alerts"`
+}
+
+type profileFile struct {
+	Panels    []string   `yaml:"panels"`
+	Threshold Thresholds `yaml:"thresholds"`
 }
 
 type alertsFile struct {
@@ -144,6 +226,7 @@ type alertsFile struct {
 	Command  *string       `yaml:"command"`
 	Cooldown string        `yaml:"cooldown"`
 	Metrics  []string      `yaml:"metrics"`
+	History  *int          `yaml:"history"`
 	Baseline *baselineFile `yaml:"baseline"`
 }
 
@@ -208,14 +291,39 @@ func Load(path string) (Config, error) {
 	if raw.LHMURL != "" {
 		cfg.LHMURL = raw.LHMURL
 	}
+	if raw.StaleAfter != "" {
+		d, err := time.ParseDuration(raw.StaleAfter)
+		if err != nil {
+			return cfg, fmt.Errorf("stale_after: %w", err)
+		}
+		cfg.StaleAfter = d
+	}
 	cfg.Threshold = mergeThreshold(cfg.Threshold, raw.Threshold)
+	cfg.baseThreshold = cfg.Threshold
 	alerts, err := applyAlerts(cfg.Alerts, raw.Alerts)
 	if err != nil {
 		return cfg, err
 	}
 	cfg.Alerts = alerts
+	profiles, err := parseProfiles(raw.Profiles)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.Profiles = profiles
+	cfg.Profile = strings.TrimSpace(raw.Profile)
 	if err := cfg.Validate(); err != nil {
 		return cfg, err
+	}
+	for name := range cfg.Profiles {
+		if _, err := cfg.WithProfile(name); err != nil {
+			return cfg, fmt.Errorf("profile %s: %w", name, err)
+		}
+	}
+	if cfg.Profile != "" {
+		cfg, err = cfg.WithProfile(cfg.Profile)
+		if err != nil {
+			return cfg, err
+		}
 	}
 	return cfg, nil
 }
@@ -242,6 +350,9 @@ func applyAlerts(base Alerts, raw *alertsFile) (Alerts, error) {
 	}
 	if raw.Metrics != nil {
 		base.Metrics = append([]string(nil), raw.Metrics...)
+	}
+	if raw.History != nil {
+		base.History = *raw.History
 	}
 	if raw.Baseline != nil {
 		b, err := applyBaseline(base.Baseline, raw.Baseline)
@@ -345,6 +456,15 @@ func (c Config) Validate() error {
 	if c.Alerts.Cooldown < 0 {
 		return fmt.Errorf("alert cooldown must be >= 0")
 	}
+	if c.Alerts.History < 0 {
+		return fmt.Errorf("alert history must be >= 0")
+	}
+	if c.StaleAfter < 0 {
+		return fmt.Errorf("stale_after must be >= 0")
+	}
+	if c.StaleAfter > 0 && c.StaleAfter < time.Second {
+		return fmt.Errorf("stale_after %s is below 1s", c.StaleAfter)
+	}
 	for _, m := range c.Alerts.Metrics {
 		if !knownMetric(m) {
 			return fmt.Errorf("unknown alert metric %q", m)
@@ -376,6 +496,66 @@ func checkPair(name string, amber, red float64) error {
 		return fmt.Errorf("%s amber %.0f must be below red %.0f", name, amber, red)
 	}
 	return nil
+}
+
+func parseProfiles(raw map[string]profileFile) (map[string]Profile, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]Profile, len(raw))
+	for name, p := range raw {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return nil, fmt.Errorf("profile name is empty")
+		}
+		panels, err := normalizePanels(p.Panels)
+		if err != nil {
+			return nil, fmt.Errorf("profile %s: %w", name, err)
+		}
+		out[name] = Profile{Panels: panels, Threshold: p.Threshold}
+	}
+	return out, nil
+}
+
+func normalizePanels(in []string) ([]string, error) {
+	if len(in) == 0 {
+		return nil, nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, n := range in {
+		c, ok := canonicalPanel(n)
+		if !ok {
+			return nil, fmt.Errorf("unknown panel %q", n)
+		}
+		if seen[c] {
+			continue
+		}
+		seen[c] = true
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+func canonicalPanel(name string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "cpu":
+		return "cpu", true
+	case "gpu":
+		return "gpu", true
+	case "mem", "memory":
+		return "mem", true
+	case "temp", "temps", "temperature":
+		return "temp", true
+	case "fan", "fans":
+		return "fan", true
+	case "disk", "disks":
+		return "disk", true
+	case "net", "network":
+		return "net", true
+	default:
+		return "", false
+	}
 }
 
 func knownMetric(metric string) bool {

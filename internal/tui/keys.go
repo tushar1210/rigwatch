@@ -10,6 +10,8 @@ type keyMap struct {
 	Help    key.Binding
 	SortCPU key.Binding
 	SortMem key.Binding
+	SortGPU key.Binding
+	Alerts  key.Binding
 	Back    key.Binding
 }
 
@@ -43,6 +45,14 @@ func newKeys() keyMap {
 			key.WithKeys("m"),
 			key.WithHelp("m", "sort mem"),
 		),
+		SortGPU: key.NewBinding(
+			key.WithKeys("g"),
+			key.WithHelp("g", "sort gpu"),
+		),
+		Alerts: key.NewBinding(
+			key.WithKeys("a"),
+			key.WithHelp("a", "alerts"),
+		),
 		Back: key.NewBinding(
 			key.WithKeys("esc"),
 			key.WithHelp("esc", "back"),
@@ -57,6 +67,7 @@ func (k keyMap) ShortHelp() []key.Binding {
 func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Quit, k.Back, k.Next, k.Prev},
-		{k.Proc, k.SortCPU, k.SortMem, k.Help},
+		{k.Proc, k.SortCPU, k.SortMem, k.SortGPU},
+		{k.Alerts, k.Help},
 	}
 }

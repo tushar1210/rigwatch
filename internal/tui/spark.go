@@ -7,7 +7,7 @@ import (
 
 const sparkBlocks = "▁▂▃▄▅▆▇█"
 
-// Sparkline draws a one-line history. Missing samples are left blank.
+// Sparkline draws a one-line history. Missing samples (NaN) are left blank.
 func Sparkline(values []float64, width int) string {
 	if width <= 0 {
 		return ""
@@ -19,12 +19,15 @@ func Sparkline(values []float64, width int) string {
 	if len(vals) > width {
 		vals = vals[len(vals)-width:]
 	}
-	min, max := vals[0], vals[0]
+	min, max := math.NaN(), math.NaN()
 	for _, v := range vals {
-		if v < min {
+		if !finite(v) {
+			continue
+		}
+		if math.IsNaN(min) || v < min {
 			min = v
 		}
-		if v > max {
+		if math.IsNaN(max) || v > max {
 			max = v
 		}
 	}
@@ -35,10 +38,27 @@ func Sparkline(values []float64, width int) string {
 	}
 	blocks := []rune(sparkBlocks)
 	for _, v := range vals {
+		if !finite(v) || math.IsNaN(min) {
+			b.WriteRune(' ')
+			continue
+		}
 		idx := sparkIndex(v, min, max, span, len(blocks))
 		b.WriteRune(blocks[idx])
 	}
 	return b.String()
+}
+
+func finite(v float64) bool {
+	return !math.IsNaN(v) && !math.IsInf(v, 0)
+}
+
+func hasFinite(vals []float64) bool {
+	for _, v := range vals {
+		if finite(v) {
+			return true
+		}
+	}
+	return false
 }
 
 func sparkIndex(v, min, max, span float64, n int) int {

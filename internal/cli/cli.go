@@ -4,8 +4,10 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -39,6 +41,8 @@ type options struct {
 	token      string
 	stdio      bool
 	remoteBin  string
+	profile    string
+	staleAfter time.Duration
 }
 
 // New returns the root command.
@@ -63,7 +67,9 @@ WebSocket or an SSH stdio tunnel.`,
 		},
 	}
 	root.PersistentFlags().StringVar(&opt.configPath, "config", "", "config file (default: $RIGWATCH_CONFIG or the user config dir)")
+	root.PersistentFlags().StringVar(&opt.profile, "profile", "", "named layout of panels and thresholds")
 	root.PersistentFlags().DurationVar(&opt.interval, "interval", time.Second, "sample interval")
+	root.PersistentFlags().DurationVar(&opt.staleAfter, "stale-after", 0, "mark a host stale after this long without a sample")
 	root.PersistentFlags().Float64Var(&opt.tempAmber, "temp-amber", 0, "amber temperature threshold °C")
 	root.PersistentFlags().Float64Var(&opt.tempRed, "temp-red", 0, "red temperature threshold °C")
 	root.PersistentFlags().Float64Var(&opt.cpuWarn, "cpu-warn", 0, "CPU percent alert")
@@ -144,6 +150,12 @@ func (o *options) resolve(cmd *cobra.Command) (config.Config, error) {
 	if err != nil {
 		return cfg, err
 	}
+	if changed(cmd, "profile") {
+		cfg, err = cfg.WithProfile(o.profile)
+		if err != nil {
+			return cfg, err
+		}
+	}
 	if changed(cmd, "interval") {
 		cfg.Interval = o.interval
 	}
@@ -180,6 +192,9 @@ func (o *options) resolve(cmd *cobra.Command) (config.Config, error) {
 	}
 	if changed(cmd, "listen") && o.listen != "" {
 		cfg.Listen = o.listen
+	}
+	if changed(cmd, "stale-after") {
+		cfg.StaleAfter = o.staleAfter
 	}
 	if err := cfg.Validate(); err != nil {
 		return cfg, err
@@ -230,7 +245,7 @@ func runTUI(ctx context.Context, cfg config.Config, opt *options, targets []agen
 		sources = make([]tui.Source, len(targets))
 		for i, target := range targets {
 			sources[i] = tui.Source{Name: target.Display, Kind: target.Kind}
-			go pumpRemote(ctx, i, target, cfg.Token, opt.remoteBin, events)
+			go pumpRemote(ctx, i, target, cfg.Token, opt.remoteBin, cfg.EffectiveStaleAfter(), events)
 		}
 	}
 	model := tui.New(tui.Options{
@@ -294,41 +309,87 @@ func pumpLocal(ctx context.Context, index int, col collect.Collector, interval t
 	}
 }
 
-func pumpRemote(ctx context.Context, index int, target agent.Target, token, remoteBin string, events chan<- tea.Msg) {
-	backoff := time.Second
+const (
+	backoffMin = time.Second
+	backoffMax = 30 * time.Second
+)
+
+func pumpRemote(ctx context.Context, index int, target agent.Target, token, remoteBin string, staleAfter time.Duration, events chan<- tea.Msg) {
+	if staleAfter < time.Second {
+		staleAfter = 3 * time.Second
+	}
+	backoff := backoffMin
 	for {
 		if ctx.Err() != nil {
 			return
 		}
 		stream, err := agent.Open(ctx, target, token, remoteBin)
 		if err != nil {
-			events <- tui.StatusMsg{Index: index, Err: err.Error()}
+			if ctx.Err() != nil {
+				return
+			}
+			events <- tui.StatusMsg{Index: index, Reconnecting: true, Err: shortErr(err)}
 			if !sleep(ctx, backoff) {
 				return
 			}
-			if backoff < 5*time.Second {
-				backoff += time.Second
-			}
+			backoff = nextBackoff(backoff)
 			continue
 		}
 		events <- tui.StatusMsg{Index: index, Err: ""}
-		backoff = time.Second
+		got := false
 		for {
-			snap, err := stream.Recv(ctx)
+			rctx, cancel := context.WithTimeout(ctx, staleAfter)
+			snap, err := stream.Recv(rctx)
+			cancel()
 			if err != nil {
 				_ = stream.Close()
 				if ctx.Err() != nil {
 					return
 				}
-				events <- tui.StatusMsg{Index: index, Err: err.Error()}
+				msg := "reconnecting"
+				if !errors.Is(err, context.DeadlineExceeded) {
+					msg = shortErr(err)
+				}
+				events <- tui.StatusMsg{Index: index, Reconnecting: true, Err: msg}
 				break
 			}
+			got = true
+			backoff = backoffMin
 			events <- tui.SampleMsg{Index: index, Snap: snap}
 		}
 		if !sleep(ctx, backoff) {
 			return
 		}
+		if !got {
+			backoff = nextBackoff(backoff)
+		}
 	}
+}
+
+func nextBackoff(d time.Duration) time.Duration {
+	d *= 2
+	if d < backoffMin {
+		return backoffMin
+	}
+	if d > backoffMax {
+		return backoffMax
+	}
+	return d
+}
+
+func shortErr(err error) string {
+	if err == nil {
+		return "disconnected"
+	}
+	s := strings.TrimSpace(err.Error())
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	r := []rune(s)
+	if len(r) > 80 {
+		return string(r[:79]) + "…"
+	}
+	return s
 }
 
 func sleep(ctx context.Context, d time.Duration) bool {

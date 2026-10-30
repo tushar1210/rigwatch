@@ -110,12 +110,17 @@ type NIC struct {
 }
 
 // Process is a process row for the top list.
+// GPU fields are set only when a sampler such as nvidia-smi reported them.
 type Process struct {
-	PID        int32   `json:"pid"`
-	Name       string  `json:"name"`
-	CPUPercent float64 `json:"cpu_percent"`
-	MemPercent float64 `json:"mem_percent"`
-	RSS        uint64  `json:"rss_bytes"`
+	PID         int32   `json:"pid"`
+	Name        string  `json:"name"`
+	CPUPercent  float64 `json:"cpu_percent"`
+	MemPercent  float64 `json:"mem_percent"`
+	RSS         uint64  `json:"rss_bytes"`
+	GPUPercent  float64 `json:"gpu_percent,omitempty"`
+	HasGPU      bool    `json:"has_gpu,omitempty"`
+	GPUMemBytes uint64  `json:"gpu_mem_bytes,omitempty"`
+	HasGPUMem   bool    `json:"has_gpu_mem,omitempty"`
 }
 
 // Gauge is a float reading that may be missing.

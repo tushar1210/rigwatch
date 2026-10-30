@@ -1,6 +1,9 @@
 package tui
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestSparkline(t *testing.T) {
 	got := Sparkline([]float64{0, 1, 2, 3, 4}, 5)
@@ -13,6 +16,10 @@ func TestSparkline(t *testing.T) {
 	}
 	if Sparkline(nil, 3) != "▁▁▁" {
 		t.Fatalf("empty = %q", Sparkline(nil, 3))
+	}
+	gap := []rune(Sparkline([]float64{1, math.NaN(), 3}, 3))
+	if len(gap) != 3 || gap[1] != ' ' {
+		t.Fatalf("gap = %q", string(gap))
 	}
 }
 

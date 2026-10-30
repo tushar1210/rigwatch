@@ -104,11 +104,11 @@ func DemoSnapshot(n int) metrics.Snapshot {
 			{Name: "wlan0", RxBytesPerSec: 0.2 * 1024 * 1024, TxBytesPerSec: 0.05 * 1024 * 1024},
 		},
 		Processes: []metrics.Process{
-			{PID: 4210, Name: "rustc", CPUPercent: wave(24, 10, 0), MemPercent: 3.2, RSS: 1100 * 1024 * 1024},
+			{PID: 4210, Name: "rustc", CPUPercent: wave(24, 10, 0), MemPercent: 3.2, RSS: 1100 * 1024 * 1024, GPUPercent: clamp(wave(62, 20, 0.4), 0, 100), HasGPU: true, GPUMemBytes: u64(1.6 * 1024 * 1024 * 1024), HasGPUMem: true},
 			{PID: 1882, Name: "chrome", CPUPercent: 6.4, MemPercent: 8.1, RSS: u64(2.4 * 1024 * 1024 * 1024)},
 			{PID: 902, Name: "dockerd", CPUPercent: 2.1, MemPercent: 1.4, RSS: 420 * 1024 * 1024},
 			{PID: 12, Name: "systemd", CPUPercent: 0.4, MemPercent: 0.2, RSS: 18 * 1024 * 1024},
-			{PID: 7741, Name: "python", CPUPercent: wave(11, 6, 1), MemPercent: 2.2, RSS: 640 * 1024 * 1024},
+			{PID: 7741, Name: "python", CPUPercent: wave(11, 6, 1), MemPercent: 2.2, RSS: 640 * 1024 * 1024, GPUPercent: clamp(wave(18, 8, 1), 0, 100), HasGPU: true, GPUMemBytes: 400 * 1024 * 1024, HasGPUMem: true},
 		},
 	}
 }
