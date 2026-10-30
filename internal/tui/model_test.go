@@ -309,6 +309,72 @@ func TestNoGPUColumnWithoutStats(t *testing.T) {
 	}
 }
 
+func TestHostShutdownConfirm(t *testing.T) {
+	calls := 0
+	m := New(Options{
+		Config:  config.Default(),
+		Sources: []Source{{Name: "forge", Kind: "ssh"}},
+		Shutdown: func(index int) error {
+			calls++
+			if index != 0 {
+				t.Fatalf("index %d", index)
+			}
+			return nil
+		},
+	})
+	m.width = 80
+	m.height = 24
+	m = press(m, 'y')
+	if calls != 0 {
+		t.Fatal("y without the switch shut the host down")
+	}
+	m = press(m, '!')
+	view := plain(m)
+	if calls != 0 || !strings.Contains(view, "SHUT DOWN forge") {
+		t.Fatalf("prompt:\n%s", view)
+	}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(Model)
+	if m.powerAsk || strings.Contains(plain(m), "SHUT DOWN") {
+		t.Fatalf("esc should cancel:\n%s", plain(m))
+	}
+	m = press(m, '!')
+	m = press(m, 'n')
+	if calls != 0 || m.powerAsk {
+		t.Fatal("n should cancel")
+	}
+	m = press(m, '!')
+	updated, cmd := m.Update(keyRune('y'))
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("confirm did not start")
+	}
+	msg := cmd()
+	updated, _ = m.Update(msg)
+	m = updated.(Model)
+	if calls != 1 || !strings.Contains(plain(m), "shutting down") {
+		t.Fatalf("calls=%d view:\n%s", calls, plain(m))
+	}
+}
+
+func TestHostShutdownDemoRefuses(t *testing.T) {
+	m := New(Options{
+		Config:  config.Default(),
+		Demo:    true,
+		Sources: []Source{{Name: "forge", Kind: "local"}},
+		Shutdown: func(int) error {
+			t.Fatal("demo shutdown")
+			return nil
+		},
+	})
+	m.width = 80
+	m.height = 20
+	m = press(m, '!')
+	if m.powerAsk || !strings.Contains(plain(m), "demo") {
+		t.Fatalf("demo:\n%s", plain(m))
+	}
+}
+
 func TestHotTempIsMarked(t *testing.T) {
 	m := New(Options{Config: config.Default(), Sources: []Source{{Name: "local"}}})
 	m.width = 100

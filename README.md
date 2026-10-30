@@ -82,13 +82,16 @@ rigwatch agent --listen :7777 --token "$RIGWATCH_TOKEN"
 | `G` | Sort by GPU memory |
 | `x`, then `y` | SIGTERM the selected process |
 | `x`, then `9`, then `y` | SIGKILL |
-| `n` | Cancel the kill prompt |
+| `n` or `esc` | Cancel a kill or shutdown prompt |
 | `a` | Alert history for this session |
+| `!`, then `y` | Shut down the selected host |
 | `?` | Help |
 
 The top three rows for the current sort are marked 1–3.
 
 `x` asks before it signals, and only on the machine you are sitting at. `--demo` and `rigwatch connect` do not send a signal. macOS and Linux need you to own the process (or root); otherwise the row says `access denied` and the process keeps running. Windows uses `taskkill`, and `9` adds `/F`.
+
+`!` is the host kill switch. It asks first: `y` powers that machine off, `n` or `esc` cancels. It works on this computer and on a connected SSH or WebSocket host. `--demo` does not send it. The agent runs `shutdown` (on Windows, `shutdown /s /t 0 /f`), so that process needs permission to power the machine off.
 
 CPU, memory, GPU, and temperature panels draw a labeled sparkline.
 

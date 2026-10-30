@@ -1,12 +1,14 @@
 package agent
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +18,7 @@ import (
 	"github.com/tushar1210/rigwatch/internal/alert"
 	"github.com/tushar1210/rigwatch/internal/collect"
 	"github.com/tushar1210/rigwatch/internal/metrics"
+	"github.com/tushar1210/rigwatch/internal/power"
 )
 
 // Server publishes samples over HTTP, WebSocket, SSE, or stdio.
@@ -27,6 +30,9 @@ type Server struct {
 	Interval  time.Duration
 	Alerts    *alert.Engine
 	Command   string
+	// Halt powers the machine off. Nil uses the operating system shutdown.
+	Halt    func() error
+	writeMu sync.Mutex
 }
 
 type frame struct {
@@ -139,26 +145,71 @@ func (s *Server) loop(ctx context.Context, h *hub) {
 }
 
 func (s *Server) serveStdio(ctx context.Context, h *hub, w io.Writer) error {
+	return s.serveStdioReader(ctx, h, w, os.Stdin)
+}
+
+func (s *Server) serveStdioReader(ctx context.Context, h *hub, w io.Writer, in io.Reader) error {
 	if w == nil {
 		return fmt.Errorf("stdio writer is nil")
 	}
-	ch, cancel := h.subscribe()
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	go s.readCommands(ctx, in, w)
+	ch, cancelSub := h.subscribe()
+	defer cancelSub()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case msg := <-ch:
-			if err := WriteSnapshot(w, msg.snap); err != nil {
-				return err
-			}
-			for _, ev := range msg.alerts {
-				if err := WriteAlert(w, ev); err != nil {
+			err := s.writeLocked(w, func(w io.Writer) error {
+				if err := WriteSnapshot(w, msg.snap); err != nil {
 					return err
 				}
+				for _, ev := range msg.alerts {
+					if err := WriteAlert(w, ev); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+			if err != nil {
+				return err
 			}
 		}
 	}
+}
+
+func (s *Server) readCommands(ctx context.Context, in io.Reader, w io.Writer) {
+	sc := bufio.NewScanner(in)
+	sc.Buffer(make([]byte, 64*1024), 1<<20)
+	for sc.Scan() {
+		if ctx.Err() != nil {
+			return
+		}
+		if !IsShutdownRequest(sc.Bytes()) {
+			continue
+		}
+		if err := s.halt(); err != nil {
+			_ = s.writeLocked(w, func(w io.Writer) error {
+				return WriteShutdownResult(w, err)
+			})
+		}
+		return
+	}
+}
+
+func (s *Server) halt() error {
+	if s.Halt != nil {
+		return s.Halt()
+	}
+	return power.Halt()
+}
+
+func (s *Server) writeLocked(w io.Writer, fn func(io.Writer) error) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return fn(w)
 }
 
 func (s *Server) listen(ctx context.Context, addr string, h *hub) error {
@@ -290,9 +341,38 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request, h *hub) {
 		return
 	}
 	defer func() { _ = conn.Close(websocket.StatusNormalClosure, "") }()
-	ctx := conn.CloseRead(context.Background())
-	ch, cancel := h.subscribe()
+	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+	var writeMu sync.Mutex
+	write := func(data []byte) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		writeCtx, cancelWrite := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelWrite()
+		return conn.Write(writeCtx, websocket.MessageText, data)
+	}
+	go func() {
+		defer cancel()
+		for {
+			_, data, err := conn.Read(ctx)
+			if err != nil {
+				return
+			}
+			if !IsShutdownRequest(data) {
+				continue
+			}
+			if err := s.halt(); err != nil {
+				ok := false
+				b, merr := json.Marshal(Envelope{Type: "shutdown", OK: &ok, Error: shutdownErrText(err)})
+				if merr == nil {
+					_ = write(b)
+				}
+			}
+			return
+		}
+	}()
+	ch, cancelSub := h.subscribe()
+	defer cancelSub()
 	for {
 		select {
 		case <-ctx.Done():
@@ -302,10 +382,7 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request, h *hub) {
 			if err != nil {
 				return
 			}
-			writeCtx, cancelWrite := context.WithTimeout(ctx, 5*time.Second)
-			err = conn.Write(writeCtx, websocket.MessageText, b)
-			cancelWrite()
-			if err != nil {
+			if err := write(b); err != nil {
 				return
 			}
 			for i := range msg.alerts {
@@ -313,10 +390,7 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request, h *hub) {
 				if err != nil {
 					return
 				}
-				writeCtx, cancelWrite = context.WithTimeout(ctx, 5*time.Second)
-				err = conn.Write(writeCtx, websocket.MessageText, ab)
-				cancelWrite()
-				if err != nil {
+				if err := write(ab); err != nil {
 					return
 				}
 			}

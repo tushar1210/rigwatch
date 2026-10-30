@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -17,6 +18,7 @@ import (
 	"github.com/tushar1210/rigwatch/internal/alert"
 	"github.com/tushar1210/rigwatch/internal/collect"
 	"github.com/tushar1210/rigwatch/internal/config"
+	"github.com/tushar1210/rigwatch/internal/power"
 	"github.com/tushar1210/rigwatch/internal/tui"
 )
 
@@ -234,18 +236,27 @@ func runTUI(ctx context.Context, cfg config.Config, opt *options, targets []agen
 	defer cancel()
 	events := make(chan tea.Msg, 32)
 	var sources []tui.Source
+	ctls := make([]*hostCtl, 1)
 	if len(targets) == 0 {
 		name, _ := os.Hostname()
 		if name == "" {
 			name = "local"
 		}
 		sources = []tui.Source{{Name: name, Kind: "local"}}
+		ctls[0] = &hostCtl{}
+		if opt.demo {
+			ctls[0].set(func(context.Context) error { return errors.New("demo") })
+		} else {
+			ctls[0].set(func(ctx context.Context) error { return power.HaltContext(ctx) })
+		}
 		go pumpLocal(ctx, 0, collector(cfg, opt.demo), cfg.Interval, events)
 	} else {
 		sources = make([]tui.Source, len(targets))
+		ctls = make([]*hostCtl, len(targets))
 		for i, target := range targets {
 			sources[i] = tui.Source{Name: target.Display, Kind: target.Kind}
-			go pumpRemote(ctx, i, target, cfg.Token, opt.remoteBin, cfg.EffectiveStaleAfter(), events)
+			ctls[i] = &hostCtl{}
+			go pumpRemote(ctx, i, target, cfg.Token, opt.remoteBin, cfg.EffectiveStaleAfter(), events, ctls[i])
 		}
 	}
 	model := tui.New(tui.Options{
@@ -253,6 +264,14 @@ func runTUI(ctx context.Context, cfg config.Config, opt *options, targets []agen
 		Sources:   sources,
 		Demo:      opt.demo && len(targets) == 0,
 		ExitAfter: opt.exitAfter,
+		Shutdown: func(index int) error {
+			if index < 0 || index >= len(ctls) || ctls[index] == nil {
+				return errors.New("not connected")
+			}
+			shutCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			defer cancel()
+			return ctls[index].call(shutCtx)
+		},
 	})
 	// Forward samples into the program.
 	forward := make(chan tea.Msg, 32)
@@ -314,7 +333,7 @@ const (
 	backoffMax = 30 * time.Second
 )
 
-func pumpRemote(ctx context.Context, index int, target agent.Target, token, remoteBin string, staleAfter time.Duration, events chan<- tea.Msg) {
+func pumpRemote(ctx context.Context, index int, target agent.Target, token, remoteBin string, staleAfter time.Duration, events chan<- tea.Msg, ctl *hostCtl) {
 	if staleAfter < time.Second {
 		staleAfter = 3 * time.Second
 	}
@@ -335,6 +354,7 @@ func pumpRemote(ctx context.Context, index int, target agent.Target, token, remo
 			backoff = nextBackoff(backoff)
 			continue
 		}
+		ctl.set(stream.Shutdown)
 		events <- tui.StatusMsg{Index: index, Err: ""}
 		got := false
 		for {
@@ -342,6 +362,12 @@ func pumpRemote(ctx context.Context, index int, target agent.Target, token, remo
 			snap, err := stream.Recv(rctx)
 			cancel()
 			if err != nil {
+				var cmdErr *agent.CommandError
+				if errors.As(err, &cmdErr) {
+					events <- tui.StatusMsg{Index: index, Err: cmdErr.Error()}
+					continue
+				}
+				ctl.set(nil)
 				_ = stream.Close()
 				if ctx.Err() != nil {
 					return
@@ -357,6 +383,7 @@ func pumpRemote(ctx context.Context, index int, target agent.Target, token, remo
 			backoff = backoffMin
 			events <- tui.SampleMsg{Index: index, Snap: snap}
 		}
+		ctl.set(nil)
 		if !sleep(ctx, backoff) {
 			return
 		}
@@ -390,6 +417,35 @@ func shortErr(err error) string {
 		return string(r[:79]) + "…"
 	}
 	return s
+}
+
+// hostCtl is the live power-off hook for one source.
+// It is nil until that host is connected.
+type hostCtl struct {
+	mu sync.Mutex
+	fn func(context.Context) error
+}
+
+func (c *hostCtl) set(fn func(context.Context) error) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.fn = fn
+	c.mu.Unlock()
+}
+
+func (c *hostCtl) call(ctx context.Context) error {
+	if c == nil {
+		return errors.New("not connected")
+	}
+	c.mu.Lock()
+	fn := c.fn
+	c.mu.Unlock()
+	if fn == nil {
+		return errors.New("not connected")
+	}
+	return fn(ctx)
 }
 
 func sleep(ctx context.Context, d time.Duration) bool {
