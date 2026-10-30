@@ -65,8 +65,17 @@ rigwatch agent --listen :7777 --token "$RIGWATCH_TOKEN"
 | `esc` | Close the overlay, or quit |
 | `tab` / `shift+tab` | Next / previous host |
 | `p` | Processes |
-| `c` / `m` | Sort processes by CPU or memory |
+| `j` / `k`, arrows | Select a process |
+| `c` | Sort processes by CPU |
+| `m` | Sort processes by memory (RSS; working set on Windows) |
+| `g` | Sort processes by GPU utilization |
+| `G` | Sort processes by GPU memory |
+| `x` | Kill the selected process. `y` sends SIGTERM, `n` cancels, `9` then `y` sends SIGKILL |
 | `?` | Help |
+
+The first three rows for the current sort are marked 1–3.
+
+`x` asks before it signals, and only on the machine you are sitting at. macOS and Linux need you to own the process (or root); otherwise the row says `access denied` and the process keeps running. Windows uses `taskkill`, and `9` adds `/F`. `--demo` and `rigwatch connect` do not send a signal.
 
 ## Config
 
