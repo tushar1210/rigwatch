@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
@@ -102,7 +103,7 @@ func TestAlertBannerClears(t *testing.T) {
 	cool.Temps[0].Celsius = 50
 	updated, _ = updated.Update(SampleMsg{Index: 0, Snap: cool})
 	view = updated.View()
-	if strings.Contains(view, "alert") {
+	if strings.Contains(view, "1 alert") || strings.Contains(ansi.Strip(view), "alert  ") {
 		t.Fatalf("banner should clear:\n%s", view)
 	}
 }
@@ -318,5 +319,120 @@ func TestHotTempIsMarked(t *testing.T) {
 	view := updated.View()
 	if !strings.Contains(view, "90") {
 		t.Fatal("expected hot temperature in the view")
+	}
+}
+
+func TestSparklinesAndProfiles(t *testing.T) {
+	m := demoModel()
+	view := m.View()
+	for _, want := range []string{"cpu", "mem", "gpu", "temp"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("missing trend %q", want)
+		}
+	}
+	if !strings.ContainsAny(view, sparkBlocks) {
+		t.Fatal("missing sparkline")
+	}
+	cfg := config.Default()
+	cfg.Panels = []string{"cpu", "temp"}
+	narrow := New(Options{Config: cfg, Sources: []Source{{Name: "local"}}})
+	narrow.width = 120
+	narrow.height = 40
+	updated, _ := narrow.Update(SampleMsg{Index: 0, Snap: collect.DemoSnapshot(2)})
+	view = updated.View()
+	if strings.Contains(view, "network") || strings.Contains(view, "memory") || strings.Contains(view, "fans") {
+		t.Fatalf("hidden panel still visible:\n%s", view)
+	}
+	if !strings.Contains(view, "cpu") || !strings.Contains(view, "temp") {
+		t.Fatalf("kept panels missing:\n%s", view)
+	}
+}
+
+func TestStaleAndReconnect(t *testing.T) {
+	m := demoModel()
+	if strings.Contains(m.View(), "stale") {
+		t.Fatal("fresh sample looks stale")
+	}
+	updated, _ := m.Update(tickMsg{now: time.Now().Add(10 * time.Second)})
+	m = updated.(Model)
+	view := m.View()
+	if !strings.Contains(view, "stale") {
+		t.Fatal("expected stale")
+	}
+	updated, _ = m.Update(StatusMsg{Index: 0, Err: "ssh closed", Reconnecting: true})
+	m = updated.(Model)
+	view = m.View()
+	if !strings.Contains(view, "stale") || !strings.Contains(view, "reconnect") || !strings.Contains(view, "ssh closed") {
+		t.Fatalf("reconnect state:\n%s", view)
+	}
+	updated, _ = m.Update(SampleMsg{Index: 0, Snap: collect.DemoSnapshot(5)})
+	view = updated.View()
+	if strings.Contains(view, "stale") || strings.Contains(view, "reconnect") {
+		t.Fatalf("sample should clear stale:\n%s", view)
+	}
+}
+
+func TestProcessGPUColumns(t *testing.T) {
+	m := demoModel()
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	m = updated.(Model)
+	view := m.View()
+	if !strings.Contains(view, "GPU") || !strings.Contains(view, "VRAM") || !strings.Contains(view, "rustc") {
+		t.Fatalf("gpu columns missing:\n%s", view)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	m = updated.(Model)
+	if !strings.Contains(m.View(), "by gpu") {
+		t.Fatal("gpu sort")
+	}
+	plainSnap := New(Options{Config: config.Default(), Sources: []Source{{Name: "local"}}})
+	plainSnap.width = 100
+	plainSnap.height = 30
+	snap := metrics.Snapshot{Processes: []metrics.Process{{PID: 1, Name: "sleep", CPUPercent: 1, MemPercent: 1, RSS: 4096}}}
+	updated, _ = plainSnap.Update(SampleMsg{Index: 0, Snap: snap})
+	updated, _ = updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	view = updated.View()
+	if strings.Contains(view, "GPU") || strings.Contains(view, "VRAM") {
+		t.Fatalf("gpu columns should hide:\n%s", view)
+	}
+	if !strings.Contains(view, "sleep") {
+		t.Fatal("plain process row")
+	}
+}
+
+func TestAlertHistory(t *testing.T) {
+	cfg := config.Default()
+	cfg.Alerts.Baseline.Enabled = false
+	m := New(Options{Config: cfg, Sources: []Source{{Name: "local"}}})
+	m.width = 100
+	m.height = 30
+	hot := metrics.Snapshot{
+		Host:  metrics.Host{Hostname: "forge"},
+		Temps: []metrics.Temp{{Name: "Tctl", Celsius: 90, Kind: "package"}},
+	}
+	updated, _ := m.Update(SampleMsg{Index: 0, Snap: hot})
+	m = updated.(Model)
+	cool := hot
+	cool.Temps[0].Celsius = 40
+	updated, _ = m.Update(SampleMsg{Index: 0, Snap: cool})
+	m = updated.(Model)
+	if strings.Contains(m.View(), "1 alert") || strings.Contains(ansi.Strip(m.View()), "alert  ") {
+		t.Fatalf("banner should clear:\n%s", m.View())
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	m = updated.(Model)
+	view := m.View()
+	for _, want := range []string{"forge", "temp", "red"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("history missing %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "RTX") {
+		t.Fatalf("history should cover the dashboard:\n%s", view)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(Model)
+	if !strings.Contains(m.View(), "cpu") || m.showAlerts {
+		t.Fatal("esc should return to the dashboard")
 	}
 }

@@ -27,15 +27,14 @@ func readPlatform(_ context.Context, _ string) Reading {
 }
 
 type smcConn struct {
-	call      func(conn uint32, selector uint32, in unsafe.Pointer, inSize uintptr, out unsafe.Pointer, outSize *uintptr) int32
-	closeFn   func(conn uint32) int32
-	release   func(object uint32) int32
-	conn      uint32
-	keys      []string
-	keysAt    time.Time
-	mu        sync.Mutex
-	openErr   error
-	attempted bool
+	call    func(conn uint32, selector uint32, in unsafe.Pointer, inSize uintptr, out unsafe.Pointer, outSize *uintptr) int32
+	closeFn func(conn uint32) int32
+	release func(object uint32) int32
+	conn    uint32
+	keys    []string
+	keysAt  time.Time
+	mu      sync.Mutex
+	openErr error
 }
 
 var (

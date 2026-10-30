@@ -3,6 +3,11 @@ interval: 1s
 listen: ":7777"
 token: ""
 lhm_url: "http://127.0.0.1:8085/data.json"
+# Mark a host stale when no sample arrives. Default is 3x interval, at least 3s.
+# SSH and agent links reconnect with backoff from 1s to 30s. CLI: --stale-after.
+# stale_after: 5s
+# Named layout. CLI --profile overrides this. Omit to show every panel.
+# profile: gaming
 thresholds:
   temp_amber: 75
   temp_red: 85
@@ -30,6 +35,9 @@ alerts:
   cooldown: 2m
   # Empty means all of: cpu, memory, gpu, temp, disk, fan.
   metrics: [cpu, memory, gpu, temp, disk, fan]
+  # Last alerts kept in memory for the TUI session. Not written to disk.
+  # 0 disables the list.
+  history: 32
   baseline:
     enabled: true
     window: 10m
@@ -38,3 +46,19 @@ alerts:
     margin_temp: 10
     margin_rpm: 400
     min_samples: 12
+
+# Profiles pick panels and overlay thresholds. Select with `profile:` or `--profile`.
+# Panel names: cpu, gpu, mem, temp, fan, disk, net.
+profiles:
+  gaming:
+    panels: [cpu, gpu, mem, temp]
+    thresholds:
+      temp_amber: 80
+      temp_red: 95
+      gpu_util_warn: 99
+  render:
+    panels: [cpu, gpu, mem, temp, disk, fan]
+    thresholds:
+      temp_amber: 70
+      temp_red: 82
+      cpu_warn: 95
