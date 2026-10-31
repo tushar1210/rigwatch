@@ -26,19 +26,23 @@ Terminal monitor for CPU, GPU, memory, disks, network, temperatures, fans, and t
 
 *Alert banner from `rigwatch --demo --temp-amber 61`. Crossed cards take the amber border, and the footer counts the open alerts.*
 
+![Shutdown confirm for forge, asking y or n](docs/shutdown.png)
+
+*`!` asks before it powers the host off. `y` shuts it down. `n` or `esc` cancels.*
+
 ## Install
 
 ```bash
 go install github.com/tushar1210/rigwatch@latest
 ```
 
-Prebuilt binaries for macOS, Linux, and Windows (`amd64` and `arm64`) are on the [v0.4.0 release](https://github.com/tushar1210/rigwatch/releases/tag/v0.4.0). SHA256 checksums are in [`checksums.txt`](https://github.com/tushar1210/rigwatch/releases/download/v0.4.0/checksums.txt).
+Prebuilt binaries for macOS, Linux, and Windows (`amd64` and `arm64`) are on the [v0.5.0 release](https://github.com/tushar1210/rigwatch/releases/tag/v0.5.0). SHA256 checksums are in [`checksums.txt`](https://github.com/tushar1210/rigwatch/releases/download/v0.5.0/checksums.txt).
 
 | | amd64 | arm64 |
 | --- | --- | --- |
-| Linux | [tar.gz](https://github.com/tushar1210/rigwatch/releases/download/v0.4.0/rigwatch_0.4.0_linux_amd64.tar.gz) | [tar.gz](https://github.com/tushar1210/rigwatch/releases/download/v0.4.0/rigwatch_0.4.0_linux_arm64.tar.gz) |
-| macOS | [tar.gz](https://github.com/tushar1210/rigwatch/releases/download/v0.4.0/rigwatch_0.4.0_darwin_amd64.tar.gz) | [tar.gz](https://github.com/tushar1210/rigwatch/releases/download/v0.4.0/rigwatch_0.4.0_darwin_arm64.tar.gz) |
-| Windows | [zip](https://github.com/tushar1210/rigwatch/releases/download/v0.4.0/rigwatch_0.4.0_windows_amd64.zip) | [zip](https://github.com/tushar1210/rigwatch/releases/download/v0.4.0/rigwatch_0.4.0_windows_arm64.zip) |
+| Linux | [tar.gz](https://github.com/tushar1210/rigwatch/releases/download/v0.5.0/rigwatch_0.5.0_linux_amd64.tar.gz) | [tar.gz](https://github.com/tushar1210/rigwatch/releases/download/v0.5.0/rigwatch_0.5.0_linux_arm64.tar.gz) |
+| macOS | [tar.gz](https://github.com/tushar1210/rigwatch/releases/download/v0.5.0/rigwatch_0.5.0_darwin_amd64.tar.gz) | [tar.gz](https://github.com/tushar1210/rigwatch/releases/download/v0.5.0/rigwatch_0.5.0_darwin_arm64.tar.gz) |
+| Windows | [zip](https://github.com/tushar1210/rigwatch/releases/download/v0.5.0/rigwatch_0.5.0_windows_amd64.zip) | [zip](https://github.com/tushar1210/rigwatch/releases/download/v0.5.0/rigwatch_0.5.0_windows_arm64.zip) |
 
 ## Usage
 
@@ -91,7 +95,7 @@ The top three rows for the current sort are marked 1–3.
 
 `x` asks before it signals, and only on the machine you are sitting at. `--demo` and `rigwatch connect` do not send a signal. macOS and Linux need you to own the process (or root); otherwise the row says `access denied` and the process keeps running. Windows uses `taskkill`, and `9` adds `/F`.
 
-`!` is the host kill switch. It asks first: `y` powers that machine off, `n` or `esc` cancels. It works on this computer and on a connected SSH or WebSocket host. `--demo` does not send it. The agent runs `shutdown` (on Windows, `shutdown /s /t 0 /f`), so that process needs permission to power the machine off.
+`!` then `y` shuts down the watched host. Confirm is required: `n` or `esc` cancels, and `--demo` does not send it. This machine runs `shutdown -h now` (Windows: `shutdown /s /t 0 /f`). A connected host is shut down by its agent. A refused shutdown shows `access denied`. A dropped link shows `not connected`.
 
 CPU, memory, GPU, and temperature panels draw a labeled sparkline.
 
